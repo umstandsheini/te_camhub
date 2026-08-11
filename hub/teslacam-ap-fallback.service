@@ -1,0 +1,6 @@
+[Unit]
+Description=Bring the Access Point up only when the home WiFi is unavailable
+
+[Service]
+Type=oneshot
+ExecStart=/opt/teslacam-hub/ap-fallback-watch.sh

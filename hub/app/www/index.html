@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>TeslaCam Hub</title>
+<link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+<body>
+
+<!-- auth / setup -->
+<div id="auth">
+  <div class="authcard">
+    <div class="logo">🚗</div>
+    <h1 id="auth_title">TeslaCam Hub</h1>
+    <p id="auth_sub">Bitte anmelden.</p>
+    <input type="password" id="auth_pass" placeholder="Passwort" autocomplete="current-password">
+    <input type="password" id="auth_pass2" placeholder="Passwort wiederholen" class="hidden" autocomplete="new-password">
+    <label class="row hidden" id="auth_import_l"><input type="checkbox" id="auth_import" checked> vorhandene Schlüssel importieren</label>
+    <button class="btn primary" id="auth_go">Anmelden</button>
+    <div class="msg" id="auth_msg"></div>
+    <a href="#" class="note" id="auth_forgot" style="display:block;margin-top:16px">Passwort vergessen?</a>
+    <div class="hidden" id="auth_reset_panel" style="margin-top:10px;text-align:left">
+      <p class="note warn">⚠ Setzt den Tresor komplett zurück: alle bisher abgerufenen Entschlüsselungs-Schlüssel und der Tesla-Login gehen unwiderruflich verloren. Zusätzlich werden alle in den Einstellungen gespeicherten Passwörter und Zugangsdaten (NAS-, WLAN-, Access-Point-Passwort, API-Tokens, MQTT-Zugangsdaten) gelöscht und müssen neu eingegeben werden. Bereits archivierte Aufnahmen auf dem NAS bleiben erhalten, ihre Schlüssel müssten aber neu von Tesla abgerufen werden. Zum Bestätigen <code>ZURUECKSETZEN</code> eintippen:</p>
+      <input type="text" id="auth_reset_confirm" placeholder="ZURUECKSETZEN">
+      <button class="btn danger" id="auth_reset_go">Tresor endgültig zurücksetzen</button>
+      <div class="msg" id="auth_reset_msg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- app shell -->
+<div id="app" class="hidden">
+  <nav class="side">
+    <div class="brand"><span class="dot"></span> TeslaCam&nbsp;Hub</div>
+    <a class="nav active" data-view="clips"><span class="ic">🎬</span> Aufnahmen</a>
+    <a class="nav" data-view="files"><span class="ic">📁</span> Dateien</a>
+    <a class="nav" data-view="videos"><span class="ic">🎞️</span> Videos</a>
+    <a class="nav" data-view="diag"><span class="ic">📊</span> Diagnose</a>
+    <a class="nav" data-view="ble"><span class="ic">🚗</span> Fahrzeug (BLE)</a>
+    <a class="nav" data-view="canbus"><span class="ic">🔌</span> CAN-Bus</a>
+    <a class="nav" data-view="trips"><span class="ic">🗺️</span> Fahrten &amp; Log</a>
+    <a class="nav" data-view="settings"><span class="ic">⚙️</span> Einstellungen</a>
+    <div class="spacer"></div>
+    <a class="nav" id="lockbtn"><span class="ic">🔒</span> Sperren</a>
+  </nav>
+  <main id="main"></main>
+</div>
+
+<div id="toast"></div>
+<script src="static/app.js"></script>
+</body>
+</html>

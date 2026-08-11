@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 30s whether the AP fallback should be up or down
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=30
+Unit=teslacam-ap-fallback.service
+
+[Install]
+WantedBy=timers.target

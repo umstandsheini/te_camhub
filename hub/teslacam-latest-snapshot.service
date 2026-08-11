@@ -1,0 +1,6 @@
+[Unit]
+Description=Point /run/teslacam-latest/mnt at the newest teslausb snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/opt/teslacam-hub/update-latest-snapshot.sh

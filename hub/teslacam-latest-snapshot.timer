@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the latest-teslausb-snapshot pointer every 60s
+
+[Timer]
+OnBootSec=10
+OnUnitActiveSec=60
+Unit=teslacam-latest-snapshot.service
+
+[Install]
+WantedBy=timers.target

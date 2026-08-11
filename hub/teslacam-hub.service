@@ -1,0 +1,19 @@
+[Unit]
+Description=TeslaCam Hub — unified viewer/files/settings/diagnostics (HTTPS)
+After=network-online.target teslacam-latest-snapshot.service
+Wants=teslacam-latest-snapshot.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /backingfiles/decrypt-viewer-state /dev/shm/teslacam
+ExecStart=/usr/bin/python3 /opt/teslacam-hub/app/server.py \
+  --port 443 --redirect80 \
+  --cert /mutable/tls/cert.pem --key /mutable/tls/key.pem \
+  --scan /run/teslacam-latest/mnt/TeslaCam \
+  --out /dev/shm/teslacam \
+  --state /backingfiles/decrypt-viewer-state
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

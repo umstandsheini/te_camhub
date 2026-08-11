@@ -1,0 +1,90 @@
+name: "Bug report"
+description: Create a new report
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Is this the right place for my bug report?**
+        If you simply have a question, please check the [FAQ](/marcone/teslausb/wiki/FAQ) first, and/or check the [troubleshooting steps](/marcone/teslausb/wiki/Troubleshooting). If those do not answer your question use [Discord](https://discord.gg/b4MHf2x).
+        If you you are reporting a problem with teslausb itself, this is the right place.
+        If the problem is a more general Linux or Raspberry Pi OS problem, then [the Raspberry Pi forums](https://www.raspberrypi.org/forums) may offer some help
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the problem
+      description: |
+        Add a clear and concise description of what you think the problem is, and how to reproduce it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: devicemodel
+    attributes:
+      label: Device
+      description: What model device are you using?
+      multiple: false
+      options:
+        - Raspberry Pi Zero W
+        - Raspberry Pi Zero 2 W
+        - Raspberry Pi 4
+        - Raspberry Pi 5
+        - Radxa Zero
+        - Rock Pi 4C plus
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: image
+    attributes:
+      label: OS Image
+      description: Which OS did you install?
+      multiple: false
+      options:
+        - Prebuilt TeslaUSB image
+        - Armbian
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: carmodel
+    attributes:
+      label: Car Model
+      description: In which model car are you seeing the problem?
+      multiple: false
+      options:
+        - Model S
+        - Model 3
+        - Model X
+        - Model Y
+    validations:
+      required: true
+
+  - type: dropdown
+    id: usbconnection
+    attributes:
+      label: USB connection
+      description: How are you connecting to the car?
+      multiple: false
+      options:
+        - Center console
+        - Glove box
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        If the web interface is working, use it to download diagnostics and copy/paste or attach them here.
+        If the web interface is not working but you can ssh in to the Pi, run `sudo /root/bin/setup-teslausb diagnose` on the Pi to obtain diagnostics and attach them here.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional information
+      description: |
+        Add any other relevant context for the problem.
