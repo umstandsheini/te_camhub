@@ -19,6 +19,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache the Raspberry Pi OS base image
+        uses: actions/cache@v4
+        with:
+          path: .image-cache
+          key: raspios-base-${{ hashFiles('tools/build-image.sh') }}
+
       - name: Check tag
         run: |
           echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+(\.[0-9]+)*$' \
@@ -41,7 +47,27 @@ jobs:
           cd dist
           for f in *.tar.gz *.img.xz; do sha256sum "$f" > "$f.sha256"; done
 
+      # The release is created empty first and every file uploaded on its own,
+      # with retries: uploading the ~460 MB image got an HTTP 500 from GitHub
+      # on the first try (2026-09-17), and `gh release create` with files
+      # deletes the whole release when one upload fails.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "TeslaCam Hub ${GITHUB_REF_NAME}" --generate-notes --verify-tag
+        run: |
+          set -eu
+          gh release create "${GITHUB_REF_NAME}" --title "TeslaCam Hub ${GITHUB_REF_NAME}" --generate-notes --verify-tag
+          for f in dist/*
+          do
+            for try in 1 2 3
+            do
+              if gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+              then
+                continue 2
+              fi
+              echo "upload of $f failed (try $try), retrying"
+              sleep 30
+            done
+            echo "giving up on $f"
+            exit 1
+          done
