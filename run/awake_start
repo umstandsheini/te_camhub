@@ -42,7 +42,7 @@ else
       if [[ -n "${TESLA_BLE_VIN:+x}" ]]
       # use Tesla BLE API to nudge the car
       then
-        if ! BLE_response=$(flock /tmp/ble.lock /root/bin/tesla-control -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" charge-port-close 2>&1)
+        if ! BLE_response=$(/root/bin/ble_log_wrap.sh awake_start_nudge -- -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" charge-port-close 2>&1)
         then
           # check false-negative BLE responses
           if [[ ( "$BLE_response" != *"already closed"* ) && ( "$BLE_response" != *"cable connected"* ) ]]
@@ -174,7 +174,7 @@ else
       elif [[ -n "${TESLA_BLE_VIN:+x}" ]]
       # Use Tesla BLE API to enable Sentry Mode
       then
-        if flock /tmp/ble.lock /root/bin/tesla-control -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" sentry-mode on
+        if /root/bin/ble_log_wrap.sh awake_start_sentry_on -- -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" sentry-mode on
         then
           log "Tesla BLE: Command sent to enable Sentry Mode."
         else

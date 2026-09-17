@@ -88,7 +88,7 @@ case "${SENTRY_CASE}" in
     elif [[ -n "${TESLA_BLE_VIN:+x}" ]]
     then
       # Use Tesla BLE API to disable Sentry Mode
-      if flock /tmp/ble.lock /root/bin/tesla-control -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" sentry-mode off
+      if /root/bin/ble_log_wrap.sh awake_stop_sentry_off -- -ble -key-file /root/.ble/key_private.pem -vin "${TESLA_BLE_VIN^^}" sentry-mode off
       then
         log "Tesla BLE: Command sent to disable Sentry Mode."
       else

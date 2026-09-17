@@ -1,0 +1,12 @@
+[Unit]
+Description=TeslaCam Hub first-install WiFi setup (hotspot + form)
+After=NetworkManager.service
+Wants=NetworkManager.service
+ConditionPathExists=!/boot/firmware/TESLAUSB_SETUP_FINISHED
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/te_camhub/setup/pi/setup-portal.py
+
+[Install]
+WantedBy=multi-user.target

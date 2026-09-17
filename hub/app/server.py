@@ -18,9 +18,18 @@ from urllib.parse import urlparse, parse_qs, unquote
 from vault import Vault, VaultError
 from viewer import Viewer
 from tesla_auth import TeslaAuth
-import tesla_api, keybridge, hubconf, files as filemod, diag, nassync, mqtt_ha, eventlog, blackbox, canbus, keepawake, videos
+import tesla_api, keybridge, hubconf, files as filemod, diag, nassync, mqtt_ha, eventlog, blackbox, canbus, keepawake, synchold, videos, assistant, osupdate, wifinets, boottime, derived, hubupdate
 
 WWW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
+
+# make_snapshot.sh links every clip into this persistent farm as it's captured,
+# and entries accumulate there across snapshot generations -- unlike --scan
+# (/run/teslacam-latest/mnt/TeslaCam), which is a symlink to only the SINGLE
+# most recent snapshot and loses visibility into any clip whose snapshot has
+# since been superseded. The Viewer browses BROWSE_ROOT so nothing recorded
+# ever "disappears" from the UI; CFG["scan"]/CFG["src"] stay on --scan since
+# nassync.py and key_fetch_loop's scan_items() are keyed off the live mount.
+BROWSE_ROOT = "/mutable/TeslaCam"
 
 CFG = {}          # filled in main()
 VAULT = None
@@ -77,10 +86,52 @@ def autolock_loop():
             print(f"[hub] auto-locked after {mins} min idle", flush=True)
 
 
+def _fetch_items(items):
+    got = 0
+    for i in range(0, len(items), 30):
+        try:
+            res = tesla_api.fetch_keys(items[i:i + 30], AUTH.get_access_token())
+        except tesla_api.DecryptApiError:
+            break
+        got += VAULT.merge_keys(res)
+    return got
+
+
+# basename -> time of the last key request for a link-farm clip, so clips
+# Tesla returns no key for are retried hourly instead of on every pass.
+_farm_tried = {}
+FARM_RETRY_SEC = 3600
+
+
+def _farm_items():
+    """Key-request items for clips in the link farm (BROWSE_ROOT) whose key
+    isn't in the vault under any layout. key_fetch_loop's main scan only
+    covers the latest snapshot, so clips from older snapshot generations
+    that were never the latest one while the vault was unlocked (a night
+    with the vault locked, say) otherwise only got a key once someone
+    opened them. Matched by basename like Viewer._by_basename; the IDs
+    requested here are farm-relative, which the Viewer matches directly."""
+    keys = VAULT.keys()
+    known = set(keys) | {posixpath.basename(k) for k in keys}
+    now = time.time()
+    for b in [b for b, t in _farm_tried.items() if now - t >= FARM_RETRY_SEC]:
+        del _farm_tried[b]
+    pend = []
+    for root, _dirs, names in os.walk(BROWSE_ROOT):
+        for nm in names:
+            if not nm.endswith(".mp4") or nm in known or nm in _farm_tried:
+                continue
+            known.add(nm)   # the same clip is linked under RecentClips/<date> and SavedClips/<event>
+            _farm_tried[nm] = now
+            pend.append(os.path.join(root, nm))
+    return keybridge.items_for(pend, BROWSE_ROOT) if pend else []
+
+
 def key_fetch_loop():
     """Fetch missing FEKs from Tesla once each into the vault (unlocked
-    only), then mirror every currently-known key onto the Pi's own local
-    TeslaCam Samba export as a sealed sidecar (see
+    only) -- for the latest snapshot and, via _farm_items, for older clips
+    in the link farm -- then mirror every currently-known key onto the Pi's
+    own local TeslaCam Samba export as a sealed sidecar (see
     nassync.push_key_sidecars_local) -- independent of whether a NAS is
     configured, since that's a separate/optional destination
     (nas_sync_loop's push_key_sidecars targets the NAS, not this). Also
@@ -93,20 +144,22 @@ def key_fetch_loop():
             if VAULT.is_unlocked():
                 if AUTH.get_access_token():
                     items = keybridge.scan_items(CFG["src"], VAULT.keys())
-                    if items:
-                        got = 0
-                        for i in range(0, len(items), 30):
-                            try:
-                                res = tesla_api.fetch_keys(items[i:i + 30], AUTH.get_access_token())
-                            except tesla_api.DecryptApiError:
-                                break
-                            got += VAULT.merge_keys(res)
-                        if got:
-                            VIEWER.invalidate()
-                            print(f"[hub] fetched {got} new keys", flush=True)
+                    got = _fetch_items(items) if items else 0
+                    got += _fetch_items(_farm_items())
+                    if got:
+                        VIEWER.invalidate()
+                        print(f"[hub] fetched {got} new keys", flush=True)
                 r = nassync.push_key_sidecars_local(VAULT)
                 if r.get("written"):
                     print(f"[hub] local key sidecars: {r['written']} neu geschrieben", flush=True)
+                sealed = VIEWER.seal_ram_telemetry()
+                if sealed:
+                    print(f"[hub] derived: {sealed} Fahrdaten-Dateien versiegelt", flush=True)
+                if blackbox.ensure_key():
+                    print("[hub] blackbox: Schlüsselpaar für die Fahrten erzeugt", flush=True)
+                moved = blackbox.migrate_plaintext()
+                if moved:
+                    print(f"[hub] blackbox: {moved} Klartext-Fahrten verschlüsselt", flush=True)
             made = VIEWER.ensure_thumbnails()
             if made:
                 print(f"[hub] background thumbnails: {made} neu erzeugt", flush=True)
@@ -123,10 +176,11 @@ def _fetch_keys_for_clip(cid):
         return 0
     keys = VAULT.keys()
     items = []
-    for path in VIEWER.clip_paths(cid).values():
+    rels = VIEWER.clip_rel_paths(cid)
+    for cam, path in VIEWER.clip_paths(cid).items():
         if not os.path.isfile(path):
             continue
-        eid = keybridge.clip_id(CFG["src"], path)
+        eid = rels[cam]
         if eid in keys:
             continue
         try:
@@ -154,23 +208,51 @@ def _fetch_keys_for_clip(cid):
     return got
 
 
+# The sync hold (synchold.py) needs to know whether a full, error-free cycle
+# has run since archiveloop's archive pass finished, and wakes this loop
+# early via _nas_kick rather than letting the car idle through the
+# 10-minute sleep. Uptime stamps (synchold.uptime()), not wall clock -- see
+# synchold.py.
+_nas_kick = threading.Event()
+_nas_cycle = {"started": None, "completed_start": None, "failed_start": None, "error": None}
+# While the sync hold keeps the car awake, a failed cycle is retried this
+# soon instead of after the usual 10 minutes -- the hold gives up after
+# SYNC_HOLD_MAX_MIN either way.
+NAS_RETRY_DURING_HOLD_SEC = 120
+
+
+def _nas_step(errors, label, r):
+    if isinstance(r, dict) and r.get("ok") is False:
+        detail = r.get("error") or "; ".join(r.get("errors") or []) or "Fehler"
+        errors.append(f"{label}: {detail}")
+
+
 def nas_sync_loop():
     """Periodically refresh the local-vs-NAS archive coverage percentage and
     push any newly-known per-video key sidecars to the NAS."""
     while True:
+        _nas_kick.clear()
+        started = synchold.uptime()
+        _nas_cycle["started"] = started
+        errors = []
         try:
-            nassync.refresh_status(CFG["scan"])
+            _nas_step(errors, "Abgleich", nassync.refresh_status(CFG["scan"]))
             if VAULT.is_unlocked():
-                nassync.push_key_sidecars(CFG["scan"], VAULT)
+                _nas_step(errors, "Schlüssel", nassync.push_key_sidecars(CFG["scan"], VAULT))
                 if hubconf.getval("NAS_RAW_KEYS") == "true":
-                    nassync.push_raw_keys(CFG["scan"], VAULT, CFG["state"])
+                    _nas_step(errors, "Rohschlüssel", nassync.push_raw_keys(CFG["scan"], VAULT, CFG["state"]))
             if hubconf.getval("SYNC_ALL_CONTENT") == "true":
-                nassync.sync_media()
+                _nas_step(errors, "Medien", nassync.sync_media())
             if hubconf.getval("BLACKBOX_ENABLED") == "true" and hubconf.getval("SYNC_TRIPS_ENABLED") != "false":
-                nassync.sync_trips(_trip["trip_id"] if _trip["active"] else None)
+                _nas_step(errors, "Fahrten", nassync.sync_trips(_trip["trip_id"] if _trip["active"] else None))
         except Exception as e:
             print("[hub] nas sync:", e, flush=True)
-        time.sleep(600)
+            errors.append(str(e))
+        if errors:
+            _nas_cycle.update(failed_start=started, error="; ".join(errors)[:300])
+        else:
+            _nas_cycle.update(completed_start=started, error=None)
+        _nas_kick.wait(NAS_RETRY_DURING_HOLD_SEC if errors and synchold.holding() else 600)
 
 
 def _ble_mqtt_command(action_id, value):
@@ -247,6 +329,7 @@ def mqtt_loop():
                     counts = VIEWER.counts()
                     st = diag.status()
                     nas = nassync.status()
+                    bt = boottime.latest() or {}
                     mqtt_ha.publish_state({
                         "clips": counts.get("clips", 0),
                         "encrypted": counts.get("encrypted", 0),
@@ -255,6 +338,9 @@ def mqtt_loop():
                         "wifi_ssid": st.get("wifi_ssid") or "–",
                         "usb_connected": bool(st.get("gadget_active")),
                         "vault_unlocked": VAULT.is_unlocked(),
+                        # only once measured -- a numeric HA sensor can't take a placeholder
+                        **{k: v for k, v in (("boot_drives", bt.get("drives_s")), ("boot_hub", bt.get("hub_s")))
+                           if v is not None},
                     })
             else:
                 mqtt_ha.disconnect()
@@ -286,15 +372,49 @@ def temp_log_loop():
         time.sleep(60)
 
 
+def _log_sync_hold_event(ev):
+    kind = ev["event"]
+    mins = int(ev.get("elapsed", 0) // 60)
+    if kind == "started":
+        eventlog.log_event("keepawake", "Zuhause und NAS erreichbar: Auto bleibt wach, bis alles "
+                                        f"synchronisiert ist (max. {ev['max_min']} Min.)")
+        return
+    if kind in ("complete", "timeout", "disabled"):
+        # The car is likely asleep -- and this Pi without power -- within
+        # minutes now; flush first, same reasoning as the sleep guard.
+        os.sync()
+    if kind == "complete":
+        eventlog.log_event("keepawake", f"Sync vollständig nach {mins} Min.: Auto darf schlafen")
+    elif kind == "timeout":
+        eventlog.log_event("keepawake", f"Sync-Limit nach {mins} Min. erreicht, noch offen: "
+                                        f"{', '.join(ev.get('waiting_for') or [])}. Auto darf schlafen")
+    elif kind == "disabled":
+        eventlog.log_event("keepawake", "Wachhalten für den Sync abgeschaltet: Auto darf schlafen")
+    elif kind == "left":
+        eventlog.log_event("keepawake", f"Heim-WLAN/NAS weg: Wachhalten für den Sync nach {mins} Min. beendet")
+
+
 def keepawake_loop():
-    """Sends the periodic BLE 'wake' nudges that keep the car from sleeping
-    while the switch is active (see keepawake.py for why a one-shot command
-    isn't enough), and auto-turns the switch back off once its expiry
-    passes. State lives on disk, so this also catches an expiry that fell
-    due while the Hub was restarting/rebooting."""
+    """Drives both reasons to keep the car awake: the manual switch (with
+    its expiry) and the sync hold (synchold.py: at home, until the NAS sync
+    is done). One BLE nudge schedule serves both, see keepawake.tick() --
+    and keepawake.py for why a one-shot command isn't enough. State lives on
+    disk, so this also catches an expiry that fell due while the Hub was
+    restarting/rebooting. Runs every 30s so the sync hold's 2-minute nudge
+    interval doesn't drift -- though 'wake' turned out not to hold the car
+    awake at any interval (see keepawake.py's docstring)."""
     while True:
+        holding = False
         try:
-            r = keepawake.tick()
+            ev, want_cycle, holding = synchold.tick(dict(_nas_cycle))
+            if want_cycle:
+                _nas_kick.set()
+            if ev:
+                _log_sync_hold_event(ev)
+        except Exception as e:
+            print("[hub] sync hold:", e, flush=True)
+        try:
+            r = keepawake.tick(hold_active=holding)
             if r is not None:
                 ev = r.get("event")
                 if ev == "expired":
@@ -305,7 +425,7 @@ def keepawake_loop():
                     eventlog.log_event("keepawake", "Wake-Nudge funktioniert wieder")
         except Exception as e:
             print("[hub] keepawake loop:", e, flush=True)
-        time.sleep(60)
+        time.sleep(30)
 
 
 def connectivity_log_loop():
@@ -357,7 +477,7 @@ def _start_trip():
 
 
 def _end_trip():
-    summary = blackbox.trip_summary(_trip["trip_id"]) if _trip["trip_id"] else {}
+    summary = blackbox.end_trip(_trip["trip_id"]) if _trip["trip_id"] else {}
     dist = summary.get("distance_km")
     msg = "Fahrt beendet"
     if dist is not None:
@@ -429,13 +549,86 @@ def trip_watch_loop():
         time.sleep(10 if _trip["active"] else 30)
 
 
+# Sleep-guard state, owned by sleep_guard_loop only.
+_sleep_guard = {"idle_since": None, "prepared": False}
+# Community-reported (not an official Tesla spec) time-to-sleep is ~15 min
+# once locked/parked/Sentry-off/not-charging. Trigger well under that so a
+# too-fast or too-slow read cadence still leaves margin.
+SLEEP_GUARD_THRESHOLD_SEC = 8 * 60
+
+
+def _sleep_guard_tick():
+    """The car (glovebox USB power, see project memory) cuts this Pi's own
+    supply on its own schedule when it sleeps -- unclean, unannounced, and
+    not something the Pi can prevent or be told about in advance. This
+    can't fix that: cam_disk.bin's dirty-bit/fsck cost after a cut is
+    entirely down to the car's own software never getting a chance to
+    close its view of that filesystem, which the Pi has no channel to
+    influence. What IS in reach: minimizing how much of the Pi's OWN state
+    (vault, hubconf settings, archiveloop.log, blackbox trip data, ...) is
+    still just dirty pages in RAM when the cut actually happens.
+
+    BLE (the paired "charging_manager" role) can't read Sentry state at
+    all, so this doesn't try to detect it -- it stays conservative and
+    treats locked + parked as "possibly heading to sleep" regardless of
+    Sentry, since a spurious sync() when Sentry is actually keeping the car
+    awake costs nothing. Once that's held continuously for
+    SLEEP_GUARD_THRESHOLD_SEC, calls os.sync() (flushes every dirty page
+    system-wide) -- deliberately nothing more invasive than that: no
+    gadget disconnect, no pausing archiveloop's own operations, since
+    acting on what's ultimately a guess about vehicle state must never risk
+    disrupting a still-active connection to the car."""
+    drive = diag.ble_read("awake", "drive")
+    closures = diag.ble_read("awake", "closures")
+    if not drive.get("ok") or not closures.get("ok"):
+        return
+    shift = (drive.get("values") or {}).get("driveState.shiftState")
+    locked = (closures.get("values") or {}).get("locked")
+    idle_eligible = locked is True and shift in ("Park", "Invalid", None)
+
+    now = time.time()
+    if not idle_eligible:
+        if _sleep_guard["prepared"]:
+            eventlog.log_event("power", "Aktivität erkannt, Sync-Vorbereitung zurückgesetzt")
+        _sleep_guard.update(idle_since=None, prepared=False)
+        return
+
+    if _sleep_guard["idle_since"] is None:
+        _sleep_guard["idle_since"] = now
+        return
+
+    if now - _sleep_guard["idle_since"] >= SLEEP_GUARD_THRESHOLD_SEC:
+        os.sync()
+        if not _sleep_guard["prepared"]:
+            mins = int((now - _sleep_guard["idle_since"]) / 60)
+            eventlog.log_event("power", f"Auto seit {mins} Min. verriegelt/geparkt -- "
+                                         "Pi-Zustand vorsorglich synchronisiert (möglicher Sleep bald)")
+            _sleep_guard["prepared"] = True
+
+
+def sleep_guard_loop():
+    while True:
+        try:
+            _sleep_guard_tick()
+        except Exception as e:
+            print("[hub] sleep guard:", e, flush=True)
+        time.sleep(60)
+
+
 def _bulk_worker():
     def progress(done, total, _cid):
         with _bulk_guard:
             _bulk_job["done"] = done
             _bulk_job["total"] = total
     try:
-        res = VIEWER.bulk_prepare(on_progress=progress)
+        # Scan once, here, so total is known as soon as the (possibly slow --
+        # full /mutable/TeslaCam walk) scan finishes, instead of only once the
+        # first clip's decrypt+thumbnail work also completes. bulk_prepare()
+        # gets the result handed in so it doesn't scan a second time.
+        targets = VIEWER.bulk_targets()
+        with _bulk_guard:
+            _bulk_job["total"] = len(targets)
+        res = VIEWER.bulk_prepare(on_progress=progress, targets=targets)
         with _bulk_guard:
             _bulk_job["errors"] = res.get("errors", [])
     except Exception as e:
@@ -491,16 +684,28 @@ class H(BaseHTTPRequestHandler):
                 start = int(a) if a else 0
                 end = int(b) if b else size - 1
                 end = min(end, size - 1)
-                f.seek(start); chunk = f.read(end - start + 1)
+                length = max(0, end - start + 1)
+                f.seek(start)
                 try:
                     self.send_response(206)
                     self.send_header("Content-Type", ctype)
                     self.send_header("Accept-Ranges", "bytes")
                     self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-                    self.send_header("Content-Length", str(len(chunk)))
+                    self.send_header("Content-Length", str(length))
                     for k, v in (extra or {}).items():
                         self.send_header(k, v)
-                    self.end_headers(); self.wfile.write(chunk)
+                    self.end_headers()
+                    # Stream the range in 1 MB pieces: a player's "bytes=0-"
+                    # asks for the whole ~36 MB clip, and reading that in one
+                    # go per request (4 cameras, again on every seek) blew
+                    # the Hub past 400 MB on the 1 GB Pi (2026-09-15).
+                    left = length
+                    while left > 0:
+                        chunk = f.read(min(1 << 20, left))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        left -= len(chunk)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
             else:
@@ -527,13 +732,26 @@ class H(BaseHTTPRequestHandler):
     def _qs(self, key):
         return parse_qs(urlparse(self.path).query).get(key, [""])[0]
 
+    def _index(self):
+        """index.html with ?v=<mtime> on app.js/style.css: /static/ is
+        served with a one-day max-age, so without this a redeploy stayed
+        invisible to a browser that had loaded the page earlier that day."""
+        with open(os.path.join(WWW, "index.html"), encoding="utf-8") as f:
+            html = f.read()
+        for name in ("app.js", "style.css"):
+            try:
+                v = int(os.path.getmtime(os.path.join(WWW, name)))
+            except OSError:
+                continue
+            html = html.replace(f'static/{name}"', f'static/{name}?v={v}"')
+        return self._raw(200, html.encode("utf-8"), "text/html; charset=utf-8", {"Cache-Control": "no-store"})
+
     # -- routing --
     def do_GET(self):
         path = urlparse(self.path).path
         # static SPA
         if path == "/" or path == "/index.html":
-            return self._sendfile(os.path.join(WWW, "index.html"), "text/html",
-                                  {"Cache-Control": "no-store"})
+            return self._index()
         if path.startswith("/static/"):
             fp = os.path.join(WWW, os.path.basename(path))
             if os.path.isfile(fp):
@@ -557,6 +775,8 @@ class H(BaseHTTPRequestHandler):
             st["login"] = AUTH.status()
             st["diag"] = diag.status()
             return self._json(200, st)
+        if path == "/api/net_tx_bytes":
+            return self._json(200, diag.net_tx_bytes())
         if path == "/api/clips":
             return self._json(200, VIEWER.clips())
         if path == "/api/all_gps":
@@ -592,6 +812,16 @@ class H(BaseHTTPRequestHandler):
             if not full:
                 return self._json(404, {"error": "not ready"})
             return self._sendfile(full, "video/mp4")
+        if path == "/api/os/status":
+            return self._json(200, osupdate.status())
+        if path == "/api/hub/update_status":
+            return self._json(200, hubupdate.status())
+        if path == "/api/assistant/state":
+            try:
+                since = int(self._qs("since") or 0)
+            except ValueError:
+                since = 0
+            return self._json(200, assistant.state(since))
         if path == "/api/settings":
             return self._json(200, hubconf.read_settings())
         if path == "/api/files":
@@ -636,7 +866,9 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/ble/status":
             return self._json(200, diag.ble_status_role(self._qs("name")))
         if path == "/api/keepawake/status":
-            return self._json(200, keepawake.status())
+            st = keepawake.status()
+            st["sync_hold"] = dict(synchold.status(), failing=keepawake.nudge_failing())
+            return self._json(200, st)
         if path == "/api/canbus/monitor/status":
             return self._json(200, canbus.monitor_status())
         if path == "/api/ap_fallback/status":
@@ -652,6 +884,8 @@ class H(BaseHTTPRequestHandler):
                                    {"Content-Disposition": 'attachment; filename="teslausb_setup_variables.conf"'})
         if path == "/api/hotspot/status":
             return self._json(200, diag.hotspot_wifi_status())
+        if path == "/api/wifi/networks":
+            return self._json(200, wifinets.status())
         if path == "/api/wireguard/status":
             return self._json(200, diag.wireguard_status())
         if path == "/api/nas/raw_keys/pairing":
@@ -674,6 +908,14 @@ class H(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 1440
             return self._json(200, {"points": eventlog.read_temperature(limit)})
+        if path == "/api/boottimes":
+            return self._json(200, boottime.status())
+        if path == "/api/temperature/series":
+            try:
+                hours = max(1, min(60 * 24, int(self._qs("hours") or "24")))
+            except ValueError:
+                hours = 24
+            return self._json(200, eventlog.read_temperature_series(hours))
         if path == "/api/temperature/download":
             p = eventlog.temperature_log_path()
             if not os.path.isfile(p):
@@ -681,14 +923,19 @@ class H(BaseHTTPRequestHandler):
             return self._sendfile(p, "text/csv",
                                    {"Content-Disposition": 'attachment; filename="temperature.log"'})
         if path == "/api/blackbox/trips":
-            return self._json(200, {"trips": blackbox.list_trips(),
-                                     "active": _trip["active"]})
+            try:
+                trips, locked = blackbox.list_trips(), False
+            except blackbox.Locked:   # trips are encrypted, see blackbox.py
+                trips, locked = [], True
+            return self._json(200, {"trips": trips, "locked": locked, "active": _trip["active"]})
         if path == "/api/blackbox/export":
             trip_id = self._qs("trip") or ""
             if not trip_id or "/" in trip_id or "\\" in trip_id:
                 return self._json(404, {"error": "not found"})
             try:
                 gpx = blackbox.to_gpx(trip_id)
+            except blackbox.Locked:
+                return self._json(423, {"error": "Tresor gesperrt"})
             except Exception as e:
                 print(f"[hub] GPX export failed for {trip_id}: {e}", flush=True)
                 return self._json(500, {"error": "export failed"})
@@ -703,6 +950,13 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self._body() or b"{}")
         except Exception:
             body = {}
+
+        # Several endpoints below remount / themselves; their remount,ro in a
+        # finally block would pull the root out from under a running dpkg.
+        if osupdate.running() and not path.startswith("/api/os/") and path not in ("/api/login", "/api/logout"):
+            return self._json(409, {"ok": False, "error": "OS-Update läuft gerade – bitte warten, bis es fertig ist"})
+        if hubupdate.running() and not path.startswith("/api/hub/") and path not in ("/api/login", "/api/logout"):
+            return self._json(409, {"ok": False, "error": "Hub-Update läuft gerade – bitte warten, bis es fertig ist"})
 
         # public auth endpoints
         if path == "/api/setup":
@@ -722,6 +976,8 @@ class H(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": False, "error": "Bestätigung fehlt"})
             VAULT.factory_reset()
             hubconf.clear_secrets()
+            DERIVED.drop()   # sealed thumbnails/telemetry: unreadable without the old master key anyway
+            blackbox.drop()  # encrypted trips: same, their private key was in the vault
             _drop_sessions(); VIEWER.clear_cache(); VIEWER.invalidate()
             return self._json(200, {"ok": True})
         if path == "/api/login":
@@ -768,7 +1024,16 @@ class H(BaseHTTPRequestHandler):
             with _bulk_guard:
                 if _bulk_job["running"]:
                     return self._json(200, dict(_bulk_job))
-                _bulk_job.update(running=True, done=0, total=len(VIEWER.bulk_targets()), errors=[])
+                # total is filled in by _bulk_worker itself, in the background --
+                # computing it here (VIEWER.bulk_targets() -> clips() -> a full
+                # /mutable/TeslaCam scan of every clip ever recorded, not just the
+                # latest snapshot) can take long enough that the POST response
+                # itself stalls, leaving the button stuck on "startet..." before
+                # the frontend's poll loop ever gets to run. Same fix Te_FITI uses
+                # for its equivalent endpoint (bg(ensure_all) starts the scan in a
+                # thread and replies immediately; _dec_job/total is populated once
+                # the thread has actually counted the work).
+                _bulk_job.update(running=True, done=0, total=0, errors=[])
             threading.Thread(target=_bulk_worker, daemon=True).start()
             with _bulk_guard:
                 return self._json(200, dict(_bulk_job))
@@ -781,6 +1046,9 @@ class H(BaseHTTPRequestHandler):
                 if not sr.get("ok"):
                     ok = False
                     err = sr.get("error")
+            if ok and "nas_skip_deleted" in body:
+                # re-count now: labels clips deleted on the NAS, or (switched off) re-queues them
+                threading.Thread(target=lambda: nassync.refresh_status(CFG["scan"]), daemon=True).start()
             if ok and "ap_fallback_only" in body:
                 enabled = str(body.get("ap_fallback_only")) in ("true", "True", "1", "on")
                 cur = hubconf.read_settings()
@@ -836,6 +1104,34 @@ class H(BaseHTTPRequestHandler):
             if img.startswith("data:") and "," in img:
                 img = img.split(",", 1)[1]
             return self._json(200, diag.import_wg_qr(img))
+        if path in ("/api/wifi/add", "/api/wifi/remove", "/api/wifi/move"):
+            try:
+                if path.endswith("/add"):
+                    return self._json(200, wifinets.add(body.get("ssid", ""), body.get("password", "")))
+                if path.endswith("/remove"):
+                    return self._json(200, wifinets.remove(body.get("ssid", "")))
+                return self._json(200, wifinets.move(body.get("ssid", ""), body.get("delta", 0)))
+            except (ValueError, TypeError) as e:
+                return self._json(200, {"ok": False, "error": str(e)})
+        if path == "/api/os/check":
+            return self._json(200, osupdate.check())
+        if path == "/api/os/upgrade":
+            return self._json(200, osupdate.start_upgrade())
+        if path == "/api/hub/update_check":
+            return self._json(200, hubupdate.check())
+        if path == "/api/hub/update_install":
+            return self._json(200, hubupdate.start_update())
+        if path == "/api/assistant/send":
+            return self._json(200, assistant.send(body.get("text", "")))
+        if path == "/api/assistant/confirm":
+            return self._json(200, assistant.confirm(body.get("id", ""), bool(body.get("approve"))))
+        if path == "/api/assistant/reset":
+            return self._json(200, assistant.reset())
+        if path == "/api/assistant/key":
+            try:
+                return self._json(200, assistant.set_key(body.get("key", "")))
+            except VaultError as e:
+                return self._json(200, {"ok": False, "error": str(e)})
         if path == "/api/files/mkdir":
             filemod.mkdir(body.get("path", "")); return self._json(200, {"ok": True})
         if path == "/api/files/delete":
@@ -1018,7 +1314,7 @@ def _redirect80():
 
 
 def main():
-    global VAULT, VIEWER, AUTH, CFG
+    global VAULT, VIEWER, AUTH, CFG, DERIVED
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=443)
     p.add_argument("--cert"); p.add_argument("--key")
@@ -1033,10 +1329,18 @@ def main():
            "tls": bool(a.cert and a.key)}
     VAULT = Vault(a.state)
     AUTH = TeslaAuth(VAULT)
-    VIEWER = Viewer(a.scan, a.out, VAULT)
+    DERIVED = derived.Derived(os.path.join(a.state, "derived"), VAULT)
+    VIEWER = Viewer(BROWSE_ROOT, a.out, VAULT, derived=DERIVED)
+    threading.Thread(target=DERIVED.prune, daemon=True).start()
     eventlog.init(a.state)
-    blackbox.init(a.state)
+    blackbox.init(a.state, VAULT)
     keepawake.init(a.state)
+    synchold.init(a.state)
+    assistant.init(VAULT)
+    boottime.init(a.state)
+    threading.Thread(target=boottime.loop, daemon=True).start()
+    hubupdate.init(a.state)
+    threading.Thread(target=hubupdate.check_loop, daemon=True).start()
     threading.Thread(target=autolock_loop, daemon=True).start()
     threading.Thread(target=key_fetch_loop, daemon=True).start()
     threading.Thread(target=nas_sync_loop, daemon=True).start()
@@ -1046,6 +1350,7 @@ def main():
     threading.Thread(target=connectivity_log_loop, daemon=True).start()
     threading.Thread(target=trip_watch_loop, daemon=True).start()
     threading.Thread(target=keepawake_loop, daemon=True).start()
+    threading.Thread(target=sleep_guard_loop, daemon=True).start()
     if a.redirect80:
         threading.Thread(target=_redirect80, daemon=True).start()
     httpd = ThreadingHTTPServer(("0.0.0.0", a.port), H)

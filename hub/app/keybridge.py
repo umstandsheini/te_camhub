@@ -89,14 +89,12 @@ def _read_head(path):
         return path, None
 
 
-def scan_items(src_dir: str, keys: dict, limit: int = 0) -> list:
-    """Items (id + wrapped key) for files WITHOUT a key – for Direct API or bookmarklet."""
-    pend = files_needing_key(src_dir, keys)
-    if limit:
-        pend = pend[:limit]
+def items_for(paths: list, src_dir: str) -> list:
+    """Items (id relative to src_dir + wrapped key) for the given files;
+    unreadable and non-eCryptfs files are skipped."""
     items = []
     with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
-        for path, head in ex.map(_read_head, pend):
+        for path, head in ex.map(_read_head, paths):
             if not head or not is_ecryptfs(head):
                 continue
             try:
@@ -106,6 +104,14 @@ def scan_items(src_dir: str, keys: dict, limit: int = 0) -> list:
             wk["id"] = clip_id(src_dir, path)
             items.append(wk)
     return items
+
+
+def scan_items(src_dir: str, keys: dict, limit: int = 0) -> list:
+    """Items (id + wrapped key) for files WITHOUT a key – for Direct API or bookmarklet."""
+    pend = files_needing_key(src_dir, keys)
+    if limit:
+        pend = pend[:limit]
+    return items_for(pend, src_dir)
 
 
 def normalize_results(payload) -> dict:

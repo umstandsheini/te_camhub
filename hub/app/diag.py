@@ -21,6 +21,42 @@ import hubconf
 # via flock; awake_start takes the identical lock around its own call.
 _ble_lock = threading.Lock()
 BLE_LOCKFILE = "/tmp/ble.lock"
+BLE_LOG = "/mutable/ble.log"
+
+
+def _hci_con_count():
+    """Best-effort count of HCI-level connections this Pi currently has
+    open -- never lets a logging problem affect the actual tesla-control
+    call (see _tc_run)."""
+    try:
+        r = subprocess.run(["hcitool", "con"], capture_output=True, text=True, timeout=5)
+        return str(r.stdout.count("handle"))
+    except Exception:
+        return "?"
+
+
+def _log_ble_call(label, args, r):
+    """Same log format/file as run/ble_log_wrap.sh (archiveloop's side) --
+    one combined trail across both BLE callers to diagnose "vehicle is
+    already connected to the maximum number of BLE devices" (a car-side
+    connection-slot limit, not the local single-adapter contention
+    _ble_lock/BLE_LOCKFILE already handle) separately from this Pi leaking
+    its own stale connections."""
+    try:
+        hci_after = _hci_con_count()  # only one convenient measurement point here (call already returned)
+        out = ((r.stdout or "") + (r.stderr or "")).replace("\n", " ")[:300]
+        with open(BLE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} [{label}] rc={r.returncode} "
+                    f"hci_after={hci_after} cmd=\"{' '.join(args)}\"\n  out: {out}\n")
+        # keep it bounded, same cap as the bash side
+        with open(BLE_LOG, encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) > 5000:
+            with open(BLE_LOG, "w", encoding="utf-8") as f:
+                f.writelines(lines[-5000:])
+    except Exception:
+        pass
+
 
 def _tc_run(args, timeout=30):
     """Run a tesla-control invocation serialized against the single
@@ -30,9 +66,12 @@ def _tc_run(args, timeout=30):
         with open(BLE_LOCKFILE, "w") as lockf:
             fcntl.flock(lockf, fcntl.LOCK_EX)
             try:
-                return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+                r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
             finally:
                 fcntl.flock(lockf, fcntl.LOCK_UN)
+    label = "hub:" + (args[-1] if args else "?")
+    _log_ble_call(label, args, r)
+    return r
 
 
 def _run(cmd, timeout=10):
@@ -40,6 +79,28 @@ def _run(cmd, timeout=10):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception:
         return None
+
+def net_tx_bytes():
+    """Cumulative transmitted-bytes counter summed across all real network
+    interfaces (skips loopback), plus the sampling time -- the frontend
+    polls this repeatedly and computes throughput from the delta between
+    two consecutive samples. Ported from marcone/teslausb#1044's
+    network_tx_bytes.sh cgi script; ours just reads sysfs instead of
+    shelling out, same source of truth (/sys/class/net/*/statistics/tx_bytes)."""
+    total = 0
+    try:
+        for name in os.listdir("/sys/class/net"):
+            if name == "lo":
+                continue
+            try:
+                with open(f"/sys/class/net/{name}/statistics/tx_bytes") as f:
+                    total += int(f.read().strip())
+            except (OSError, ValueError):
+                pass
+    except OSError:
+        pass
+    return {"sample_ms": int(time.time() * 1000), "tx_bytes": total}
+
 
 def status():
     def out(cmd):

@@ -238,7 +238,12 @@ then
 fi
 
 CAM_DISK_FILE_NAME="$BACKINGFILES_MOUNTPOINT/cam_disk.bin"
-MUSIC_DISK_FILE_NAME="$BACKINGFILES_MOUNTPOINT/music_disk.bin"
+# MUSIC_SIZE sizes the Media drive: Music lives in a "Music" folder on
+# media_disk.bin (label MEDIA), the name the gadget, the Hub's file browser
+# (run/auto.www) and the live device have used since 2026-08-06. LightShow
+# and Boombox stay on their own images -- Tesla only recognizes one of the
+# two when they share a partition.
+MUSIC_DISK_FILE_NAME="$BACKINGFILES_MOUNTPOINT/media_disk.bin"
 LIGHTSHOW_DISK_FILE_NAME="$BACKINGFILES_MOUNTPOINT/lightshow_disk.bin"
 BOOMBOX_DISK_FILE_NAME="$BACKINGFILES_MOUNTPOINT/boombox_disk.bin"
 
@@ -323,7 +328,7 @@ then
   rm -rf "$BACKINGFILES_MOUNTPOINT/snapshots" &> /dev/null
 fi
 
-add_drive "music" "MUSIC" "$MUSIC_DISK_SIZE" "$MUSIC_DISK_FILE_NAME" "$USE_EXFAT"
+add_drive "music" "MEDIA" "$MUSIC_DISK_SIZE" "$MUSIC_DISK_FILE_NAME" "$USE_EXFAT"
 
 add_drive "lightshow" "LIGHTSHOW" "$LIGHTSHOW_DISK_SIZE" "$LIGHTSHOW_DISK_FILE_NAME" "$USE_EXFAT"
 

@@ -33,7 +33,10 @@ apt-get update -y
 # a manually-installed static build, the existing workaround on this box),
 # skip asking apt for the real package instead of re-attempting (and
 # re-failing) that huge pull on every install.sh re-run.
-PKGS="python3-pip openssl wireguard-tools libzbar0 python3-pil python3-pyzbar openresolv firmware-realtek"
+# wireless-tools/iw: diag.status() and synchold read the current SSID via
+# iwgetid, and wifi-powersave-off.service needs iw -- Lite images don't
+# promise either.
+PKGS="python3-pip openssl wireguard-tools libzbar0 python3-pil python3-pyzbar openresolv firmware-realtek wireless-tools iw"
 if ! command -v ffmpeg > /dev/null; then
   PKGS="$PKGS ffmpeg"
 fi
@@ -45,19 +48,31 @@ echo "[hub-install] installing OS packages ($PKGS)"
 # only these small libs.
 apt-get install -y --no-install-recommends $PKGS
 
-echo "[hub-install] installing python deps (pycryptodome, paho-mqtt, bleak)"
-pip3 install --break-system-packages --quiet pycryptodome paho-mqtt bleak 2>/dev/null \
-  || pip3 install --quiet pycryptodome paho-mqtt bleak
+echo "[hub-install] installing python deps (pycryptodome, paho-mqtt, bleak, anthropic)"
+# anthropic: Claude API SDK for the Assistent tab (1.x needs Python >= 3.10,
+# Bookworm ships 3.11). assistant.py imports it lazily, so it costs no RAM
+# until the tab is actually used.
+pip3 install --break-system-packages --quiet pycryptodome paho-mqtt bleak anthropic 2>/dev/null \
+  || pip3 install --quiet pycryptodome paho-mqtt bleak anthropic
 
 echo "[hub-install] copying app to $HUB_DST"
 mkdir -p "$HUB_DST"
-rsync -a --delete --exclude '__pycache__' "$HUB_SRC/app/" "$HUB_DST/app/"
+# --checksum: a file changed in an update can keep its size and mtime
+rsync -a --delete --checksum --exclude '__pycache__' "$HUB_SRC/app/" "$HUB_DST/app/"
 mkdir -p "$STATE_DIR" /dev/shm/teslacam "$TLS_DIR"
+# The version the update check compares against GitHub's latest release
+# (hubupdate.py). Release packages carry the tag in VERSION; a checkout says "dev".
+if [ -f "$HUB_SRC/../VERSION" ]; then
+  tr -d ' \r\n' < "$HUB_SRC/../VERSION" > "$HUB_DST/VERSION"
+else
+  echo dev > "$HUB_DST/VERSION"
+fi
+install -m 755 "$HUB_SRC/hub-update.sh" "$HUB_DST/hub-update.sh"
 
 # teslausb's own first-boot setup fetches run/archiveloop and
 # run/make_snapshot.sh from ${REPO}/teslausb/${BRANCH} -- a URL scheme
 # that assumes the fork keeps the upstream repo name. This fork is named
-# te_camhub, so REPO=umstandsheini 404s (see teslausb_setup_variables.conf.sample's
+# te_camhub, so REPO=bernd780 404s (see teslausb_setup_variables.conf.sample's
 # REPO/BRANCH comment) and the device is stuck running unmodified
 # marcone/main-dev core scripts. That silently breaks archiving on any
 # car whose firmware writes dashcam clips under TeslaCam/EncryptedClips/
@@ -68,10 +83,13 @@ mkdir -p "$STATE_DIR" /dev/shm/teslacam "$TLS_DIR"
 # versions directly so a fresh stick doesn't need to hit that failure
 # once before getting patched by hand.
 echo "[hub-install] deploying this fork's run/archiveloop + run/make_snapshot.sh (upstream REPO/BRANCH fetch can't reach a renamed fork -- see comment above)"
+# install, not cp: it replaces the file instead of writing into it, and a
+# running archiveloop (bash reads its script as it goes) keeps the old copy
+# until its next start -- an update from the Hub runs while archiveloop does.
 mkdir -p /root/bin
-cp "$HUB_SRC/../run/archiveloop" /root/bin/archiveloop
-cp "$HUB_SRC/../run/make_snapshot.sh" /root/bin/make_snapshot.sh
-chmod +x /root/bin/archiveloop /root/bin/make_snapshot.sh
+install -m 755 "$HUB_SRC/../run/archiveloop" /root/bin/archiveloop
+install -m 755 "$HUB_SRC/../run/make_snapshot.sh" /root/bin/make_snapshot.sh
+install -m 755 "$HUB_SRC/../run/filter_savedclips_window.py" /root/bin/filter_savedclips_window.py
 
 echo "[hub-install] generating self-signed TLS cert (if missing)"
 if [ ! -f "$TLS_DIR/cert.pem" ] || [ ! -f "$TLS_DIR/key.pem" ]; then
@@ -136,18 +154,28 @@ fi
 
 echo "[hub-install] ensuring SMB/Samba share of TeslaCam (Einstellungen -> SMB-Freigabe; on by default)"
 if [ -f "$CONF" ] && [ "$(getconf_val SAMBA_ENABLED)" != "false" ]; then
-  # Snapshot BEFORE running configure-samba.sh: its own first-install branch
-  # already creates a 'pi' Samba account with the insecure default password
-  # "raspberry" (see setup/pi/configure-samba.sh). Checking pdbedit *after*
-  # running it would always find that entry and skip generating a real
-  # password -- this must key off whether smbd existed beforehand instead.
-  FIRST_SAMBA_INSTALL=false
-  hash smbd 2>/dev/null || FIRST_SAMBA_INSTALL=true
+  # configure-samba.sh's first-install branch creates a 'pi' Samba account
+  # with the insecure default password "raspberry". That branch can run here
+  # or already in setup-teslausb (SAMBA_ENABLED=true in the config) -- and in
+  # the second case the old "was smbd installed before this script?" check
+  # skipped the password, which is exactly how the 2026-09-14 rebuild ended
+  # up sharing every recording as pi/raspberry. A marker on /mutable instead
+  # sets a generated password exactly once per install, never on re-runs
+  # (which would silently invalidate the password the user already has).
+  SMB_PW_MARKER=/mutable/.hub-smb-password-set
   SAMBA_GUEST=false bash "$HUB_SRC/../setup/pi/configure-samba.sh"
+  # The stock ExecCondition (is-configured, ~13 s even idle) timed out under
+  # boot I/O load and took the share down with it; smbd's own start then hit
+  # the 90 s default. "server role = standalone server" makes the condition a
+  # constant anyway (SESSION_FINDINGS_2026-09-13.md §3).
+  mkdir -p /etc/systemd/system/smbd.service.d
+  printf '[Service]\nExecCondition=\nTimeoutStartSec=600\n' > /etc/systemd/system/smbd.service.d/override.conf
+  systemctl daemon-reload
   systemctl enable --now smbd nmbd 2>/dev/null || true
-  if [ "$FIRST_SAMBA_INSTALL" = "true" ]; then
+  if [ ! -e "$SMB_PW_MARKER" ]; then
     GENPW="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c16)"
     printf '%s\n%s\n' "$GENPW" "$GENPW" | smbpasswd -s -a pi >/dev/null 2>&1
+    touch "$SMB_PW_MARKER"
     echo "[hub-install] generated SMB password for user 'pi' (overriding the script's insecure 'raspberry' default): $GENPW"
     echo "[hub-install]   change it any time in Einstellungen -> SMB-Freigabe"
   fi

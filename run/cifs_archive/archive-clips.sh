@@ -36,9 +36,22 @@ mkdir -p "$ARCHIVE_MOUNT/$rsynctmp"
 
 rm -f /tmp/archive-rsync-cmd.log /tmp/archive-error.log
 
+# Optional safety net alongside archiveloop's fq_codel qdisc change (see
+# marcone/teslausb#728): if a saturating transfer still starves
+# connectionmonitor's liveness check despite fq_codel, capping rsync's own
+# throughput leaves it headroom. Off by default (empty/0 = no limit, same
+# as omitting --bwlimit) -- set ARCHIVE_BWLIMIT_KBPS if fq_codel alone
+# doesn't fix repeated "connection dead, killing archive-clips" kills.
+declare -a bwlimitopt=()
+if [ -n "${ARCHIVE_BWLIMIT_KBPS:-}" ] && [ "${ARCHIVE_BWLIMIT_KBPS}" != "0" ]
+then
+  bwlimitopt=("--bwlimit=${ARCHIVE_BWLIMIT_KBPS}")
+fi
+
 while [ -n "${1+x}" ]
 do
   if ! (rsync -avhRL --remove-source-files --temp-dir="$rsynctmp" --no-perms --omit-dir-times --stats \
+        "${bwlimitopt[@]}" \
         --log-file=/tmp/archive-rsync-cmd.log --ignore-missing-args \
         --files-from="$2" "$1/" "$ARCHIVE_MOUNT" &> /tmp/rsynclog || [[ "$?" = "24" ]] )
   then

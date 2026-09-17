@@ -1,0 +1,116 @@
+#!/bin/bash
+# First boot of a stock Raspberry Pi OS Lite (Bookworm) image for this fork.
+# Raspberry Pi Imager installs it with --first-run-script: it lands on the
+# boot partition as firstrun.sh, Imager appends "systemd.run=..." to
+# cmdline.txt, and this script removes that again when done.
+#
+# Replaces upstream's prebuilt one-step-setup image: the fork's source tree
+# and the teslausb config are placed on the boot partition next to this
+# script (te_camhub.tar.gz, teslausb_setup_variables.conf), so nothing is
+# fetched from GitHub -- whose ${REPO}/teslausb URL scheme can't reach a repo
+# that isn't named "teslausb" anyway.
+#
+# Before flashing, also remove "init=/usr/lib/raspberrypi-sys-mods/firstboot"
+# from cmdline.txt: it grows the root partition over the whole disk, and
+# setup-teslausb needs the free space behind it for /backingfiles and
+# /mutable.
+#
+# Placeholders filled in per install (never commit the filled-in copy):
+#   @SSH_PUBKEY@  public key allowed to log in as pi
+#   @PW_HASH@     crypt(3) hash for pi's password (openssl passwd -6)
+
+set +e
+
+BOOT=/boot/firmware
+CONF_SRC=$BOOT/teslausb_setup_variables.conf
+CUSTOM=/usr/lib/raspberrypi-sys-mods/imager_custom
+PUBKEY='@SSH_PUBKEY@'
+PWHASH='@PW_HASH@'
+
+# SSID, WIFIPASS, TESLAUSB_HOSTNAME and TIME_ZONE come from the teslausb
+# config itself, so no secret needs to be copied into this script.
+if [ -f "$CONF_SRC" ]
+then
+  sed -i 's/\r$//' "$CONF_SRC"
+  # shellcheck disable=SC1090
+  . "$CONF_SRC"
+fi
+HOST=${TESLAUSB_HOSTNAME:-teslausb}
+
+if [ -x "$CUSTOM" ]
+then
+  $CUSTOM set_hostname "$HOST"
+else
+  CURRENT=$(tr -d " \t\n\r" < /etc/hostname)
+  echo "$HOST" > /etc/hostname
+  sed -i "s/127.0.1.1.*$CURRENT/127.0.1.1\t$HOST/g" /etc/hosts
+fi
+
+/usr/lib/userconf-pi/userconf pi "$PWHASH"
+echo 'pi ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/010_pi-nopasswd
+chmod 440 /etc/sudoers.d/010_pi-nopasswd
+
+ls /etc/ssh/ssh_host_*_key > /dev/null 2>&1 || ssh-keygen -A
+if [ -x "$CUSTOM" ]
+then
+  $CUSTOM enable_ssh -k "$PUBKEY"
+else
+  install -o pi -g pi -m 700 -d /home/pi/.ssh
+  echo "$PUBKEY" > /home/pi/.ssh/authorized_keys
+  chown pi:pi /home/pi/.ssh/authorized_keys
+  chmod 600 /home/pi/.ssh/authorized_keys
+  systemctl enable ssh
+fi
+
+# WiFi: write the NetworkManager connection directly. The first install
+# (2026-09-14) relied on imager_custom set_wlan with a plain passphrase and an
+# nmcli fallback -- it left no connection at all (nmcli can't work here:
+# NetworkManager isn't running under kernel-command-line.target), and WiFi
+# stayed rfkill-blocked because no country was set, so setup-teslausb never
+# reached the package mirrors. Also put cfg80211.ieee80211_regdom=DE into
+# cmdline.txt when flashing; otherwise Raspberry Pi OS blocks WiFi again.
+if [ -n "${SSID:-}" ] && [ -n "${WIFIPASS:-}" ]
+then
+  NMFILE="/etc/NetworkManager/system-connections/${SSID}.nmconnection"
+  ( umask 077
+    printf '[connection]\nid=%s\nuuid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=true\n\n[wifi]\nmode=infrastructure\nssid=%s\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk=%s\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n' \
+      "$SSID" "$(cat /proc/sys/kernel/random/uuid)" "$SSID" "$WIFIPASS" > "$NMFILE" )
+  chown root:root "$NMFILE"
+  chmod 600 "$NMFILE"
+fi
+command -v raspi-config > /dev/null && raspi-config nonint do_wifi_country DE
+rfkill unblock wifi 2> /dev/null
+for f in /var/lib/systemd/rfkill/*:wlan
+do
+  [ -e "$f" ] && echo 0 > "$f"
+done
+
+if [ -x "$CUSTOM" ]
+then
+  $CUSTOM set_timezone "${TIME_ZONE:-Europe/Berlin}"
+  $CUSTOM set_keymap de
+else
+  ln -sf "/usr/share/zoneinfo/${TIME_ZONE:-Europe/Berlin}" /etc/localtime
+fi
+
+# Fork source + config for setup-teslausb, which rc.local runs on every boot
+# until /teslausb/TESLAUSB_SETUP_FINISHED exists (upstream's headless flow).
+mkdir -p /root/te_camhub /root/bin
+if tar xzf "$BOOT/te_camhub.tar.gz" -C /root/te_camhub
+then
+  rm -f "$BOOT/te_camhub.tar.gz"
+fi
+if [ -f "$CONF_SRC" ]
+then
+  mv "$CONF_SRC" /root/teslausb_setup_variables.conf
+  chmod 600 /root/teslausb_setup_variables.conf
+fi
+install -m 755 /root/te_camhub/pi-gen-sources/00-teslausb-tweaks/files/rc.local /etc/rc.local
+install -m 755 /root/te_camhub/setup/pi/setup-teslausb /root/bin/setup-teslausb
+ln -sfn "$BOOT" /teslausb
+# WiFi is already set up above; skip rc.local's own WiFi step and its extra reboot.
+touch "$BOOT/WIFI_ENABLED"
+
+rm -f "$BOOT/firstrun.sh"
+sed -i 's| systemd.run.*||g' "$BOOT/cmdline.txt"
+exit 0

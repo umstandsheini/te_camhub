@@ -83,6 +83,8 @@ h2.title{margin:2px 0 18px;font-size:22px;font-weight:700}
 .badge.locked{color:var(--bad);border-color:#4a2830}
 .badge.nasok{color:#7ee0a0;border-color:#264a34}
 .badge.nasno{color:var(--muted);border-color:var(--line)}
+.navbadge{margin-left:auto;font-size:11px;font-weight:600;padding:1px 7px;border-radius:9px;background:var(--accent2);color:#0e1116}
+.badge.nasdel{color:var(--muted);border-color:var(--line);border-style:dashed}
 .badge.keyok{color:#7ee0a0;border-color:#264a34}
 .badge.keypartial{color:var(--warn);border-color:#4a3b1e}
 
@@ -176,6 +178,37 @@ table.probe td{padding:4px 8px 4px 0;border-top:1px solid var(--line);font-size:
 table.probe td:first-child{width:20px;text-align:center}
 .logbox{background:#0a0d12;border:1px solid var(--line);border-radius:10px;padding:12px;
   font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;max-height:60vh;overflow:auto;color:#c9d4df}
+
+/* ---------- temperature chart ---------- */
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{background:transparent;border:none;color:var(--muted);padding:6px 11px;font-size:12.5px;white-space:nowrap}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--card2);color:var(--text);font-weight:600}
+.tchart{position:relative;margin-top:10px;outline:none;--series-1:#3987e5;--grid:#2b3543;--axis:#93a1b0}
+.tchart svg{display:block;width:100%;height:auto}
+.tchart:focus-visible{box-shadow:0 0 0 2px var(--accent2);border-radius:6px}
+.tchart .tt{position:absolute;top:6px;pointer-events:none;background:#0b0e13;border:1px solid var(--line);border-radius:8px;
+  padding:6px 9px;font-size:12px;color:var(--muted);white-space:nowrap;box-shadow:var(--shadow)}
+.tchart .tt b{display:block;color:var(--text);font-size:14px}
+.tchart .empty{padding:30px 0;text-align:center;color:var(--muted);font-size:13px}
+table.tlist{border-collapse:collapse;margin-top:6px;font-variant-numeric:tabular-nums}
+table.tlist td{padding:3px 14px 3px 0;border-top:1px solid var(--line);font-size:12.5px;color:var(--text)}
+table.tlist tr:first-child td{color:var(--muted);border-top:none}
+
+/* ---------- assistant ---------- */
+.chatlog{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px}
+.chatmsg{max-width:88%;align-self:flex-start;padding:10px 13px;border-radius:12px;background:var(--card);
+  border:1px solid var(--line);font-size:14px;line-height:1.45;overflow-wrap:anywhere}
+.chatmsg.user{align-self:flex-end;background:var(--card2);white-space:pre-wrap}
+.chatmsg code{background:var(--bg2);padding:1px 5px;border-radius:5px;font-size:12.5px}
+.chatstep{font-size:12.5px;color:var(--muted);padding:0 4px;overflow-wrap:anywhere}
+.chatstep.err{color:var(--bad)}
+.card.confirm{border-color:var(--warn)}
+.card.confirm ul{margin:4px 0 8px;padding-left:18px}
+.chatinput{display:flex;gap:8px;align-items:flex-end}
+.chatinput textarea{flex:1;min-width:0;padding:10px 12px;background:var(--bg2);border:1px solid var(--line);
+  border-radius:10px;color:var(--text);font:inherit;resize:vertical}
+.chatinput textarea:focus{outline:none;border-color:var(--accent2)}
 
 /* ---------- toast ---------- */
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#0b0e13;border:1px solid var(--line);

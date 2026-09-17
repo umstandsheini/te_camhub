@@ -118,3 +118,46 @@ def read_temperature(limit=1440):
             except ValueError:
                 pass
     return out
+
+
+def read_temperature_series(hours=24, max_points=720):
+    """Temperature for the last `hours` for the Hub's chart, folded into
+    about max_points time buckets (min/avg/max each; one more when the
+    window straddles a bucket edge): 30 days at one reading per minute
+    would otherwise be ~43k points. Times go out as
+    epoch seconds; the log's timestamps are the Pi's local time. Parses the
+    timestamp by slicing instead of strptime, which is slow enough on the
+    Pi to matter across a whole month of lines."""
+    p = _path("temperature.log")
+    empty = {"points": [], "bucket_sec": 60, "hours": hours, "latest": None}
+    if not os.path.isfile(p):
+        return empty
+    since = time.time() - hours * 3600
+    since_s = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since))
+    rows = []
+    with open(p, encoding="utf-8") as f:
+        for line in f:
+            ts, _, v = line.strip().partition(",")
+            if len(ts) != 19 or ts < since_s:
+                continue
+            try:
+                t = time.mktime((int(ts[0:4]), int(ts[5:7]), int(ts[8:10]),
+                                 int(ts[11:13]), int(ts[14:16]), int(ts[17:19]), 0, 0, -1))
+                rows.append((t, float(v)))
+            except ValueError:
+                continue
+    if not rows:
+        return empty
+    rows.sort()   # a reboot before NTP sync can log a few lines out of order
+    bucket = max(60, -(-hours * 3600 // (max_points * 60)) * 60)
+    agg = {}
+    for t, v in rows:
+        b = agg.get(int(t // bucket))
+        if b is None:
+            agg[int(t // bucket)] = [v, v, v, 1]
+        else:
+            b[0] = min(b[0], v); b[1] = max(b[1], v); b[2] += v; b[3] += 1
+    pts = [{"t": k * bucket, "min": b[0], "max": b[1], "avg": round(b[2] / b[3], 2)}
+           for k, b in sorted(agg.items())]
+    return {"points": pts, "bucket_sec": bucket, "hours": hours,
+            "latest": {"t": rows[-1][0], "temp": rows[-1][1]}}

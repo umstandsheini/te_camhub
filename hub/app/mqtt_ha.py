@@ -47,6 +47,9 @@ SENSORS = {
     "wifi_ssid": ("sensor", "WLAN", None, None, "mdi:wifi"),
     "usb_connected": ("binary_sensor", "USB am Auto", "connectivity", None, None),
     "vault_unlocked": ("binary_sensor", "Tresor entsperrt", "lock", None, None),
+    # this boot's timing (boottime.py): seconds from power-on
+    "boot_drives": ("sensor", "Start: Laufwerke bereit", "duration", "s", "mdi:timer-outline"),
+    "boot_hub":    ("sensor", "Start: Hub bereit", "duration", "s", "mdi:timer-outline"),
 }
 
 # ---------------------------------------------------------------------------

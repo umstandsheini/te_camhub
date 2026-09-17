@@ -159,7 +159,12 @@ then
   sed -i -r "s@(/\s+ext4\s+\S+)@\1,ro@" /etc/fstab
 fi
 
-if ! grep -w -q "/var/log" /etc/fstab
+# Match the mount point field exactly: "grep -w /var/log" also matched the
+# /var/log/nginx and /var/log/journal lines added earlier in setup, so /var/log
+# silently stayed on the read-only root -- services then kept log files open
+# there whenever root was remounted rw, which made the remount back to ro
+# fail with "mount point is busy" (2026-09-14).
+if ! grep -q -E '^[^#[:space:]]+[[:space:]]+/var/log[[:space:]]' /etc/fstab
 then
   echo "tmpfs /var/log tmpfs nodev,nosuid 0 0" >> /etc/fstab
 fi

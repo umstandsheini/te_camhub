@@ -5,6 +5,11 @@ Wants=teslacam-latest-snapshot.service
 
 [Service]
 Type=simple
+# glibc gives every thread its own malloc arena and keeps freed memory in it.
+# The Hub runs each clip decrypt (~36 MB buffers) in a fresh worker thread,
+# and on 2026-09-15 that left 436 MB of anonymous RSS across 15 threads on
+# this 1 GB Pi. Two arenas keep freed buffers reusable instead.
+Environment=MALLOC_ARENA_MAX=2
 ExecStartPre=/bin/mkdir -p /backingfiles/decrypt-viewer-state /dev/shm/teslacam
 ExecStart=/usr/bin/python3 /opt/teslacam-hub/app/server.py \
   --port 443 --redirect80 \
@@ -14,6 +19,14 @@ ExecStart=/usr/bin/python3 /opt/teslacam-hub/app/server.py \
   --state /backingfiles/decrypt-viewer-state
 Restart=on-failure
 RestartSec=5
+# 1 GB Pi: throttle/kill the Hub inside its own cgroup before a global OOM
+# can take out archiveloop, sshd or the gadget tooling. Includes the tmpfs
+# pages the Hub writes (decrypted clip cache in /dev/shm, capped at 200 MB).
+# NOTE: only effective with `cgroup_enable=memory` in cmdline.txt -- the Pi
+# firmware adds cgroup_disable=memory by default, and then systemd ignores
+# these two lines. The real protection is viewer._DECRYPT_SLOTS.
+MemoryHigh=380M
+MemoryMax=480M
 
 [Install]
 WantedBy=multi-user.target

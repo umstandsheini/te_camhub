@@ -1,0 +1,47 @@
+# A tag vYYYY.MM.DD (or vYYYY.MM.DD.N) builds a release:
+#   te_camhub-<tag>.tar.gz   source tree with VERSION = <tag> -- what the Hub's
+#                            update function (hub/app/hubupdate.py) installs
+#   te_camhub-<tag>.img.xz   installation image (tools/build-image.sh)
+#   *.sha256                 checksums; the Hub refuses a package without one
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag
+        run: |
+          echo "${GITHUB_REF_NAME}" | grep -Eq '^v[0-9]+(\.[0-9]+)*$' \
+            || { echo "tag must look like v2026.09.17 or v2026.09.17.1"; exit 1; }
+
+      - name: Source package
+        run: |
+          set -eu
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist stage/te_camhub
+          git archive HEAD | tar -x -C stage/te_camhub
+          echo "$TAG" > stage/te_camhub/VERSION
+          tar -C stage -czf "dist/te_camhub-$TAG.tar.gz" te_camhub
+
+      - name: Installation image
+        run: sudo tools/build-image.sh --src "dist/te_camhub-${GITHUB_REF_NAME}.tar.gz" --out "dist/te_camhub-${GITHUB_REF_NAME}.img.xz"
+
+      - name: Checksums
+        run: |
+          cd dist
+          for f in *.tar.gz *.img.xz; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "TeslaCam Hub ${GITHUB_REF_NAME}" --generate-notes --verify-tag

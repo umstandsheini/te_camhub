@@ -1,0 +1,28 @@
+TeslaCam Hub – Erstinstallation
+===============================
+
+Weg A – mit Konfigurationsdatei (ohne Handy)
+  1. teslausb_setup_variables.conf auf diesem Laufwerk mit einem Texteditor
+     öffnen, mindestens SSID und WIFIPASS eintragen (NAS optional), speichern.
+  2. Laufwerk sicher auswerfen, in den Raspberry Pi stecken, Pi mit dem
+     Netzteil starten.
+
+Weg B – über den Einrichtungs-Hotspot
+  1. Laufwerk unverändert in den Raspberry Pi stecken, Pi mit dem Netzteil starten.
+  2. Nach 2–3 Minuten mit dem WLAN "TeslaCam-Setup" verbinden
+     (Passwort: teslacam-setup). Die Einrichtungsseite öffnet sich von selbst,
+     sonst im Browser http://192.168.4.1 aufrufen.
+  3. Formular ausfüllen und speichern.
+
+Danach richtet sich der Pi selbst ein: 20–40 Minuten, mehrere Neustarts,
+bitte nicht vom Strom trennen. Fortschritt steht in
+teslausb-headless-setup.log auf diesem Laufwerk.
+
+Fertig ist es, wenn https://teslausb.local (bzw. der gewählte Gerätename)
+im Heim-WLAN antwortet. Dort das Tresor-Passwort festlegen.
+
+Kommt der Pi mit den Angaben nicht ins WLAN, öffnet er nach ein paar Minuten
+wieder "TeslaCam-Setup". Schnelles Dauerblinken aller LEDs heißt: Einrichtung
+fehlgeschlagen – Ursache im Log.
+
+Anleitung: https://github.com/umstandsheini/te_camhub

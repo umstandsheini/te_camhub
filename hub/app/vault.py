@@ -205,6 +205,24 @@ class Vault:
             self._data["token"] = dict(tok or {})
             self._write_enc()
 
+    def get_secret(self, name: str) -> str:
+        """Small named secrets (e.g. the Assistent's Anthropic API key) get
+        the same protection as the Tesla token: encrypted at rest, in RAM
+        only while unlocked, gone with factory_reset()."""
+        self._require()
+        return str((self._data.get("secrets") or {}).get(name) or "")
+
+    def set_secret(self, name: str, value: str):
+        """Store a named secret; an empty value removes it."""
+        with _lock:
+            self._require()
+            store = self._data.setdefault("secrets", {})
+            if value:
+                store[name] = value
+            else:
+                store.pop(name, None)
+            self._write_enc()
+
     # ---- per-clip key sidecar (encrypted with MK) --------------------------
     def seal(self, plaintext: bytes) -> bytes:
         """Encrypt arbitrary bytes with the MK (for the NAS key sidecars)."""

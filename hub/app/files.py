@@ -12,7 +12,7 @@ teslamotors/light-show#111), so the earlier Music+LightShow+Boombox merge
 broke both features in the car and had to be partially undone. Music has
 no such restriction and stays merged into Media.
 """
-import os, shutil, subprocess
+import os, shutil, subprocess, fcntl, time
 
 FS_BASE = "/var/www/html/fs"   # teslausb mounts Media/LightShow/Boombox here (see run/auto.www)
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")
@@ -98,6 +98,61 @@ def move(rel, destdir):
     shutil.move(full, os.path.join(dest, os.path.basename(full)))
 
 
+# archiveloop's archive_lock_and_run holds this flock for its whole archive
+# pass (fsck/snapshot/copy, with the gadget disconnected in between). Taking
+# the same lock keeps a Hub-side write from re-attaching the drives mid-pass.
+ARCHIVE_LOCK = "/tmp/teslausb_archive.lock"
+GADGET_UDC = "/sys/kernel/config/usb_gadget/teslausb/UDC"
+
+
+def _gadget_bound():
+    try:
+        with open(GADGET_UDC) as f:
+            return bool(f.read().strip())
+    except OSError:
+        return False
+
+
+def with_drives_detached(fn, lock_wait=60):
+    """Run fn() with the USB drives detached from the car, then re-attach.
+
+    The backing images are exported live as raw USB mass-storage LUNs, and
+    the car caches the FAT directory it already read over USB -- it won't
+    notice a file changed underneath it until the drive is unplugged and
+    replugged. Every place that edits a backing image therefore brackets the
+    write with disable_gadget.sh/enable_gadget.sh, as archiveloop does for
+    its own steps. os.sync() before re-attaching, or the car can read the
+    image while the new bytes still sit in the Pi's page cache. Drives that
+    weren't attached to begin with (archiveloop between phases) are left
+    detached; archiveloop re-attaches them itself."""
+    fd = os.open(ARCHIVE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        deadline = time.time() + lock_wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise RuntimeError("Archivierung läuft gerade – bitte in ein paar Minuten erneut versuchen")
+                time.sleep(2)
+        was_bound = _gadget_bound()
+        if was_bound:
+            subprocess.run(["/root/bin/disable_gadget.sh"], capture_output=True, timeout=60)
+        try:
+            result = fn()
+        finally:
+            os.sync()
+            if was_bound:
+                r = subprocess.run(["/root/bin/enable_gadget.sh"], capture_output=True, text=True, timeout=120)
+        if was_bound and r.returncode != 0:
+            raise RuntimeError("Geschrieben, aber die USB-Laufwerke ließen sich nicht wieder verbinden: "
+                               + ((r.stdout or "") + (r.stderr or "")).strip()[-200:])
+        return result
+    finally:
+        os.close(fd)
+
+
 LOCKCHIME_MAX_BYTES = 1024 * 1024  # Tesla requires LockChime.wav <= 1 MB
 
 
@@ -106,18 +161,8 @@ def set_lockchime(rel):
     car plays on lock/unlock -- overwriting it. Source must live under
     Boombox/ and already meet Tesla's own requirements for that file
     (.wav, <=1MB), since the copy just becomes the new LockChime.wav
-    verbatim.
-
-    boombox_disk.bin is also exported live as a raw USB mass-storage LUN to
-    the car whenever the gadget is connected (see
-    /sys/kernel/config/usb_gadget/teslausb/functions/mass_storage.0/lun.3).
-    Every other place in this codebase that touches a backing image
-    (archiveloop's fsck/trim/snapshot steps) disconnects the gadget first
-    for exactly this reason: the car caches the FAT directory it already
-    read over USB and won't notice a file changed underneath it until the
-    drive is unplugged and replugged, so writing LockChime.wav while
-    connected updates the bytes on disk but the car keeps playing the old
-    chime. Bracket the copy the same way."""
+    verbatim. boombox_disk.bin is exported live to the car as lun.3, hence
+    with_drives_detached()."""
     rel_norm = (rel or "").replace("\\", "/").lstrip("/")
     if not rel_norm.startswith("Boombox/"):
         raise ValueError("Quelle muss im Boombox-Ordner liegen")
@@ -130,12 +175,11 @@ def set_lockchime(rel):
         raise ValueError("Datei zu groß (max. 1 MB für LockChime.wav)")
     dest = _safe("Boombox/LockChime.wav")
     tmp = dest + ".tmp"
-    subprocess.run(["/root/bin/disable_gadget.sh"], capture_output=True)
-    try:
+
+    def write():
         shutil.copyfile(full, tmp)
         os.replace(tmp, dest)
-    finally:
-        subprocess.run(["/root/bin/enable_gadget.sh"], capture_output=True)
+    with_drives_detached(write)
 
 
 def save_upload(destrel, filename, fileobj):

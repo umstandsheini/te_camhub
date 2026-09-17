@@ -370,6 +370,7 @@ function install_archive_scripts () {
   copy_script run/remountfs_rw "$install_path"
   copy_script run/awake_start "$install_path"
   copy_script run/awake_stop "$install_path"
+  copy_script run/record_boot_marker.sh "$install_path"
   log_progress "Installing archive module scripts"
   copy_script "$archive_module"/verify-and-configure-archive.sh /tmp
   copy_script "$archive_module"/archive-clips.sh "$install_path"
@@ -829,3 +830,118 @@ WantedBy=backingfiles.mount
 EOF
 
 systemctl enable teslausb.service
+
+systemctl disable boot-marker.service || true
+
+# Deliberately independent of mutable.mount/backingfiles.mount (unlike
+# teslausb.service above) -- the whole point is to leave evidence of a boot
+# attempt even on a boot where those mounts, or archiveloop itself, never
+# get a chance to run. See run/record_boot_marker.sh's own comment: a
+# stretch with no marker in /var/log/boot_markers.log means the kernel
+# itself never started (no power); a marker with nothing from
+# teslausb.service/archiveloop afterwards means it did, but something later
+# failed instead.
+cat << EOF > /lib/systemd/system/boot-marker.service
+[Unit]
+Description=Record an early boot marker for power-loss/failure forensics
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/bin/record_boot_marker.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+EOF
+
+systemctl enable boot-marker.service
+
+# Connect the car's drives right after /backingfiles is mounted, instead of
+# whenever archiveloop gets there (190-240 s after power-on on the old USB
+# stick, while a woken, locked car stays awake only 1-4 min -- see
+# SESSION_FINDINGS_2026-09-13.md §1). Nothing else is on this path: no
+# /mutable, no network, no fsck. enable_gadget.sh is idempotent, so
+# archiveloop's own connect afterwards is a no-op. The watch unit logs when
+# the host has actually configured the drives -- power-on to that journal
+# line is the number every boot optimization is judged by.
+copy_script run/gadget-watch.sh /root/bin
+systemctl disable teslausb-gadget.service teslausb-gadget-watch.service &> /dev/null || true
+cat << EOF > /lib/systemd/system/teslausb-gadget.service
+[Unit]
+Description=Connect the USB drives to the car as early as possible
+DefaultDependencies=no
+Requires=backingfiles.mount sys-kernel-config.mount
+After=backingfiles.mount sys-kernel-config.mount systemd-modules-load.service
+Before=teslausb.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /root/bin/enable_gadget.sh
+
+[Install]
+WantedBy=backingfiles.mount
+EOF
+cat << EOF > /lib/systemd/system/teslausb-gadget-watch.service
+[Unit]
+Description=Log when the host has configured the USB drives
+DefaultDependencies=no
+Requires=teslausb-gadget.service
+After=teslausb-gadget.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /root/bin/gadget-watch.sh
+
+[Install]
+WantedBy=backingfiles.mount
+EOF
+systemctl enable teslausb-gadget.service teslausb-gadget-watch.service
+
+# The next three used to exist only as hand-made changes on the old device
+# (SESSION_FINDINGS_2026-08-11.md §1 and §6, SESSION_FINDINGS_2026-09-13.md §3)
+# and would have been lost by a fresh install.
+
+# Persistent journal on /mutable: root is read-only from early boot, so
+# journald silently falls back to RAM and every power cut erases the logs
+# that would explain it. Sized for /mutable's fixed 300 MB (see
+# create-backingfiles-partition.sh): the old device's hand-made
+# SystemKeepFree=500M could never be satisfied there, which left journald
+# almost no room to persist anything.
+mkdir -p /mutable/journal /etc/systemd/journald.conf.d
+cat << EOF > /etc/systemd/journald.conf.d/50-teslausb.conf
+[Journal]
+Storage=persistent
+SystemMaxUse=64M
+SystemKeepFree=48M
+MaxRetentionSec=30day
+EOF
+if ! grep -q '[[:space:]]/var/log/journal[[:space:]]' /etc/fstab
+then
+  echo "/mutable/journal /var/log/journal none bind 0 0" >> /etc/fstab
+fi
+
+# WiFi power-save on a marginal garage signal caused device-wide SSH, HTTPS
+# and NAS stalls, killing archive transfers mid-way.
+cat << EOF > /lib/systemd/system/wifi-powersave-off.service
+[Unit]
+Description=Disable WiFi power-save on wlan0
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "iw dev wlan0 set power_save off || iwconfig wlan0 power off"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable wifi-powersave-off.service
+
+# No unattended bootloader updates: one EEPROM release is reported to have
+# broken USB boot from exactly the Netac SSD this device boots from
+# (0dd8:0562, forums.raspberrypi.com t=295818). Update deliberately instead.
+systemctl mask rpi-eeprom-update.service &> /dev/null || true

@@ -87,16 +87,21 @@ class EcryptfsFile:
         buf[16:16 + len(s)] = s
         return hashlib.md5(bytes(buf)).digest()[:16]
 
-    def decrypt(self, fek: bytes) -> bytes:
+    def decrypt(self, fek: bytes) -> bytearray:
+        """Plaintext as a bytearray, filled in place. The old version grew
+        a bytearray page by page and then sliced and copied it into bytes --
+        ~4 full-size copies at the peak, ~150 MB for one ~36 MB clip, which
+        a 1 GB Pi can't afford (see viewer._DECRYPT_SLOTS)."""
         fek = bytes(fek)
         root_iv = hashlib.md5(fek).digest()
-        out = bytearray()
-        page = 0
-        for off in range(HEADER_SIZE, len(self.data), PAGE_SIZE):
+        out = bytearray(len(self.data) - HEADER_SIZE)
+        src = memoryview(self.data)
+        for page, off in enumerate(range(HEADER_SIZE, len(self.data), PAGE_SIZE)):
             iv = self._derive_iv(root_iv, page)
-            out += _aes_cbc_decrypt(fek, iv, self.data[off:off + PAGE_SIZE])
-            page += 1
-        return bytes(out[:self.plaintext_size])
+            o = off - HEADER_SIZE
+            out[o:o + PAGE_SIZE] = _aes_cbc_decrypt(fek, iv, src[off:off + PAGE_SIZE])
+        del out[self.plaintext_size:]
+        return out
 
 
 def build_test_file(plaintext: bytes, fek: bytes) -> bytes:

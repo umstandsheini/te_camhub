@@ -20,6 +20,8 @@ FIELD_MAP = {
     "archive_savedclips": "ARCHIVE_SAVEDCLIPS",
     "archive_sentryclips": "ARCHIVE_SENTRYCLIPS",
     "archive_trackmodeclips": "ARCHIVE_TRACKMODECLIPS",
+    "archive_savedclips_last_minutes": "ARCHIVE_SAVEDCLIPS_LAST_MINUTES",
+    "archive_bwlimit_kbps": "ARCHIVE_BWLIMIT_KBPS",
     # network
     "ssid": "SSID",
     "wifipass": "WIFIPASS",
@@ -67,8 +69,11 @@ FIELD_MAP = {
     "sync_all_content": "SYNC_ALL_CONTENT",
     "sync_media_path": "SYNC_MEDIA_PATH",
     "nas_raw_keys": "NAS_RAW_KEYS",
+    "nas_skip_deleted": "NAS_SKIP_DELETED",
     "blackbox_enabled": "BLACKBOX_ENABLED",
     "sync_trips_enabled": "SYNC_TRIPS_ENABLED",
+    "sync_hold_enabled": "SYNC_HOLD_ENABLED",
+    "sync_hold_max_min": "SYNC_HOLD_MAX_MIN",
     "retention_mode": "RETENTION_MODE",
     "retention_days": "RETENTION_DAYS",
     "retention_free_gb": "RETENTION_FREE_GB",
@@ -76,17 +81,20 @@ FIELD_MAP = {
     "ssh_disable_password": "SSH_DISABLE_PASSWORD",
     "viewer_extra_roots": "VIEWER_EXTRA_ROOTS",
     "samba_enabled": "SAMBA_ENABLED",
+    "wifi_networks": "WIFI_NETWORKS",   # JSON list, managed by wifinets.py
 }
 BOOLS = {"archive_recentclips", "archive_savedclips", "archive_sentryclips",
          "archive_trackmodeclips", "pushover_enabled", "telegram_enabled", "ap_fallback_only",
          "sync_all_content", "ssh_disable_password", "mqtt_enabled", "nas_raw_keys", "blackbox_enabled",
-         "sync_trips_enabled", "samba_enabled", "hotspot_enabled", "wg_enabled"}
+         "sync_trips_enabled", "samba_enabled", "hotspot_enabled", "wg_enabled",
+         "sync_hold_enabled", "nas_skip_deleted"}
 INTS = {"snapshot_interval", "archive_delay", "retention_days",
-        "retention_free_gb", "vault_autolock_min", "mqtt_port", "wg_keepalive"}
+        "retention_free_gb", "vault_autolock_min", "mqtt_port", "wg_keepalive",
+        "archive_savedclips_last_minutes", "archive_bwlimit_kbps", "sync_hold_max_min"}
 SECRETS = {"share_password", "wifipass", "ap_pass", "teslafi_api_token",
            "tessie_api_token", "pushover_user_key", "pushover_app_key",
            "telegram_bot_token", "mqtt_password", "hotspot_pass",
-           "wg_psk", "wg_privkey"}  # returned only as *_set, never in clear
+           "wg_psk", "wg_privkey", "wifi_networks"}  # returned only as *_set, never in clear
 
 
 def getval(name):
@@ -119,6 +127,12 @@ def read_settings():
         out["vault_autolock_min"] = "180"
     if not out.get("sync_trips_enabled"):
         out["sync_trips_enabled"] = "true"   # opt-out, not opt-in -- matches nas_sync_loop's default
+    if not out.get("sync_hold_enabled"):
+        out["sync_hold_enabled"] = "true"    # opt-out too -- matches synchold.enabled()
+    if not out.get("sync_hold_max_min"):
+        out["sync_hold_max_min"] = str(120)  # synchold.DEFAULT_MAX_MIN
+    if not out.get("nas_skip_deleted"):
+        out["nas_skip_deleted"] = "true"     # opt-out too -- matches nassync.skip_deleted()
     return out
 
 

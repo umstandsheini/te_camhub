@@ -209,8 +209,11 @@ then
   then
     source "/root/teslausb_setup_variables.conf"
   else
-    # No conf file found, can't complete setup
+    # No conf file found, can't complete setup. Wait for one instead of
+    # running setup into an error: the installation image's setup portal
+    # (setup/pi/setup-portal.py) writes it and reboots.
     setup_progress "Setup appears not to have completed, but you didn't provide a teslausb_setup_variables.conf."
+    exit 0
   fi
 
   # Make the bin dir if needed to grab the setup script into it and persist
@@ -221,15 +224,23 @@ then
 
   if [ ! -e "/root/bin/setup-teslausb" ]
   then
-    REPO=${REPO:-marcone}
-    BRANCH=${BRANCH:-main-dev}
-    # Script doesn't exist, grab it.
-    setup_progress "Grabbing main setup file."
-    if ! get_script /root/bin setup-teslausb setup/pi
+    if [ -n "${SOURCE_DIR:-}" ] && [ -f "$SOURCE_DIR/setup/pi/setup-teslausb" ]
     then
-      setup_progress "Failed to retrieve setup script. Check network settings."
-      error_strobe &
-      exit 0
+      # Local source tree (this fork: GitHub's ${REPO}/teslausb URL scheme
+      # can't reach a repo that isn't named "teslausb").
+      setup_progress "Using setup script from $SOURCE_DIR"
+      install -m 755 "$SOURCE_DIR/setup/pi/setup-teslausb" /root/bin/setup-teslausb
+    else
+      REPO=${REPO:-marcone}
+      BRANCH=${BRANCH:-main-dev}
+      # Script doesn't exist, grab it.
+      setup_progress "Grabbing main setup file."
+      if ! get_script /root/bin setup-teslausb setup/pi
+      then
+        setup_progress "Failed to retrieve setup script. Check network settings."
+        error_strobe &
+        exit 0
+      fi
     fi
   fi
 

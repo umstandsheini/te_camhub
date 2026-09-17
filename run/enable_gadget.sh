@@ -16,9 +16,45 @@ readonly lang=0x409
 # appears to be to use "c"
 readonly cfg=c
 
+function bind_gadget () {
+  local udc
+  udc=$(find /sys/class/udc -type l -printf '%P\n' | head -1)
+  if [ -z "$udc" ]
+  then
+    echo "error: no USB device controller found (dtoverlay=dwc2 missing?)"
+    return 1
+  fi
+  # g_ether is loaded from cmdline.txt so the host sees a well-behaved
+  # device instead of a mute one until this runs (see setup-teslausb's
+  # fix_cmdline_txt_modules_load) -- and it holds the UDC until unloaded.
+  if grep -q '^g_ether ' /proc/modules
+  then
+    modprobe -r g_ether
+  fi
+  echo "$udc" > "$gadget_root/UDC"
+  if [ "$(cat "$gadget_root/UDC")" != "$udc" ]
+  then
+    echo "error: gadget did not bind to $udc"
+    return 1
+  fi
+  echo "bound to $udc at $(cut -d' ' -f1 /proc/uptime)s uptime"
+}
+
+# The car needs a *bound* gadget, not merely a configured one. This used to
+# exit whenever the configfs directory existed -- which it also does after a
+# failed bind (g_ether still holding the UDC), so every later caller logged
+# "already prepared" while the car had no drive at all (2026-09-11). An
+# existing directory now only skips re-creating it; the bind is always
+# checked, and a failure is an error, not silence.
 if [ -d "$gadget_root" ]
 then
-  echo "already prepared"
+  if [ -n "$(cat "$gadget_root/UDC" 2> /dev/null)" ]
+  then
+    echo "already bound to $(cat "$gadget_root/UDC")"
+    exit 0
+  fi
+  echo "configured but not bound, binding now"
+  bind_gadget
   exit 0
 fi
 
@@ -101,4 +137,4 @@ fi
 ln -sf "$gadget_root/functions/mass_storage.0" "$gadget_root/configs/$cfg.1"
 
 # activate
-find /sys/class/udc -type l -printf '%P\n' | head -1 > "$gadget_root/UDC"
+bind_gadget

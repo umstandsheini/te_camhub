@@ -62,6 +62,7 @@ async function doAuth(){
 function startApp(){
   $("#auth").classList.add("hidden");$("#app").classList.remove("hidden");
   render("clips");
+  checkHubUpdateHint();
 }
 document.querySelectorAll("nav .nav[data-view]").forEach(a=>a.onclick=()=>{
   document.querySelectorAll("nav .nav").forEach(n=>n.classList.remove("active"));
@@ -75,6 +76,7 @@ function render(view){
   const m=$("#main");m.innerHTML="";
   if(view==="clips")return viewClips(m);
   if(view==="files")return viewFiles(m,"");
+  if(view==="assistant")return viewAssistant(m);
   if(view==="videos")return viewVideos(m);
   if(view==="diag")return viewDiag(m);
   if(view==="ble")return viewBle(m);
@@ -116,8 +118,10 @@ async function viewClips(m){
     let st;try{st=await jpost("api/bulk_prepare",{});}catch(e){bulkbtn.disabled=false;bulkmsg.textContent="✗ Fehler";return;}
     const poll=async()=>{
       try{st=await jget("api/bulk_prepare");}catch(e){return;}
-      bulkmsg.textContent=st.total?`${st.done} / ${st.total}…`:"nichts zu tun";
-      if(st.running){setTimeout(poll,1500);}
+      if(st.running){
+        bulkmsg.textContent=st.total?`${st.done} / ${st.total}…`:"suche Clips…";
+        setTimeout(poll,1500);
+      }
       else{
         bulkbtn.disabled=false;
         bulkmsg.textContent=st.errors&&st.errors.length?`fertig, ${st.errors.length} Fehler`:(st.total?"✓ fertig":"nichts zu tun");
@@ -158,7 +162,8 @@ async function viewClips(m){
       const keyTxt=kk===0?"🔑 kein Schlüssel":kk<kt?`🔑 ${kk}/${kt} Kameras`:"🔑 Schlüssel vorhanden";
       b.append(el("span","badge "+keyCls,keyTxt));
     }
-    b.append(el("span","badge "+(nasClips[c.id]?"nasok":"nasno"),nasClips[c.id]?"☁️ auf NAS":"☁️ noch nicht"));
+    const ns=nasClips[c.id];
+    b.append(el("span","badge "+(ns==="deleted"?"nasdel":ns?"nasok":"nasno"),ns==="deleted"?"🗑 auf NAS gelöscht":ns?"☁️ auf NAS":"☁️ noch nicht"));
     meta.append(b);card.append(meta);
     card.onclick=()=>openClip(c);
     grid.append(card);
@@ -198,7 +203,7 @@ async function refreshNasStatus(nasrow){
   nasrow.innerHTML="";
   if(s.ok===null){nasrow.append(el("span",null,"NAS-Archiv: noch nicht geprüft "));}
   else if(!s.ok){nasrow.append(el("span",null,"NAS-Archiv: nicht erreichbar ("+(s.error||"Fehler")+") "));}
-  else{nasrow.append(el("span",null,`NAS-Archiv: ${s.percent}% archiviert (${s.on_nas}/${s.total} Clips) `));}
+  else{nasrow.append(el("span",null,`NAS-Archiv: ${s.percent}% archiviert (${s.on_nas}/${s.total} Clips${s.deleted?`, ${s.deleted} auf dem NAS gelöscht`:""}${s.requeued?`, ${s.requeued} Dateien werden erneut übertragen`:""}) `));}
   const rl=el("a",null,"jetzt prüfen");
   rl.onclick=async()=>{nasrow.querySelector("span").textContent="NAS-Archiv: prüfe…";await jpost("api/nas/sync_status/refresh",{});setTimeout(()=>refreshNasStatus(nasrow),20000);};
   nasrow.append(rl);
@@ -481,6 +486,113 @@ function audioPlayer(rel,name){
 }
 function human(b){b=+b||0;const u=["B","KB","MB","GB"];let i=0;while(b>=1024&&i<3){b/=1024;i++;}return b.toFixed(i?1:0)+" "+u[i];}
 
+/* ---------------- Assistent ---------------- */
+let ASSIST_TIMER=null;
+// Claude's replies can quote web pages: escape everything, then allow only
+// http(s) links, **bold**, `code` and line breaks.
+function mdLite(s){
+  let h=String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  h=h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  h=h.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  h=h.replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/`([^`]+)`/g,"<code>$1</code>");
+  return h.replace(/\n/g,"<br>");
+}
+async function viewAssistant(m){
+  if(ASSIST_TIMER){clearTimeout(ASSIST_TIMER);ASSIST_TIMER=null;}
+  m.innerHTML="";
+  m.append(el("h2","title","Assistent"));
+  m.append(el("div","sub","Sucht Lightshows und Boombox-Sounds im Netz und spielt sie auf die USB-Laufwerke. Installieren und Löschen passiert erst nach deiner Bestätigung."));
+  const keyBox=el("div","card");m.append(keyBox);
+  const log=el("div","chatlog");m.append(log);
+  const pend=el("div","card confirm hidden");m.append(pend);
+  const busy=el("div","chatstep hidden","⏳ Claude arbeitet…");m.append(busy);
+  const inp=el("div","chatinput");
+  inp.innerHTML=`<textarea rows="2" placeholder="z. B. „Such mir eine Weihnachts-Lightshow“"></textarea><button class="btn sm">Senden</button>`;
+  m.append(inp);
+  const foot=el("div","saverow");
+  foot.innerHTML=`<span class="note"></span><span style="flex:1"></span><button class="btn sm ghost">Neues Gespräch</button>`;
+  m.append(foot);
+  const ta=inp.querySelector("textarea"),sendBtn=inp.querySelector("button");
+  const usage=foot.querySelector(".note"),resetBtn=foot.querySelector("button");
+  let since=0,conv=null,keySet=null;
+
+  function renderKey(set){
+    if(set===keySet)return;keySet=set;
+    if(set){
+      keyBox.innerHTML=`<div class="saverow" style="margin:0"><span class="note">✓ Anthropic-API-Key im Tresor hinterlegt</span><span style="flex:1"></span><button class="btn sm ghost">Key entfernen</button></div>`;
+      keyBox.querySelector("button").onclick=async()=>{
+        if(!confirm("API-Key aus dem Tresor entfernen?"))return;
+        await jpost("api/assistant/key",{key:""});keySet=null;poll();
+      };
+      return;
+    }
+    keyBox.innerHTML=`<h3>Anthropic-API-Key</h3>
+      <div class="note">Der Assistent nutzt die Claude-API (Abrechnung pro Nutzung, getrennt vom Claude-Abo). Key unter console.anthropic.com → API Keys erstellen und hier einfügen – er wird verschlüsselt im Tresor gespeichert.</div>
+      ${fld("API-Key","as_key","password","","sk-ant-…")}
+      <div class="saverow"><button class="btn sm">Speichern &amp; prüfen</button><span class="note"></span></div>`;
+    const b=keyBox.querySelector(".saverow button"),msg=keyBox.querySelector(".saverow .note");
+    b.onclick=async()=>{
+      msg.textContent="prüfe…";
+      const r=await jpost("api/assistant/key",{key:$("#as_key").value});
+      if(r.ok){toast(r.warning?"Key gespeichert ("+r.warning+")":"Key gespeichert");keySet=null;poll();}
+      else msg.textContent="✗ "+(r.error||"Fehler");
+    };
+  }
+  function addEvent(e){
+    let d;
+    if(e.t==="user"){d=el("div","chatmsg user");d.textContent=e.text;}
+    else if(e.t==="assistant"){d=el("div","chatmsg",mdLite(e.text));}
+    else{
+      const pre={confirm:"❓ ",info:"ℹ️ ",error:"⚠ "}[e.t]||"";
+      d=el("div","chatstep"+(e.err||e.t==="error"||(e.t==="confirm_result"&&!e.approved)?" err":""));
+      d.textContent=pre+e.text;
+    }
+    log.append(d);
+  }
+  function renderPending(p){
+    if(!p){pend.classList.add("hidden");pend.dataset.id="";return;}
+    if(pend.dataset.id===p.id)return;
+    pend.dataset.id=p.id;pend.classList.remove("hidden");
+    pend.innerHTML=`<h3></h3><ul class="note"></ul><div class="saverow"><button class="btn sm">Ausführen</button><button class="btn sm ghost">Abbrechen</button></div>`;
+    pend.querySelector("h3").textContent=p.summary;
+    const ul=pend.querySelector("ul");
+    (p.details||[]).forEach(t=>{const li=el("li");li.textContent=t;ul.append(li);});
+    const [ok,no]=pend.querySelectorAll("button");
+    const answer=async a=>{ok.disabled=no.disabled=true;await jpost("api/assistant/confirm",{id:p.id,approve:a});poll();};
+    ok.onclick=()=>answer(true);no.onclick=()=>answer(false);
+    pend.scrollIntoView({behavior:"smooth",block:"nearest"});
+  }
+  async function poll(){
+    if(ASSIST_TIMER){clearTimeout(ASSIST_TIMER);ASSIST_TIMER=null;}
+    if(!document.body.contains(log))return;
+    let s;try{s=await jget("api/assistant/state?since="+since);}catch(e){return;}
+    if(conv!==null&&conv!==s.conv){conv=s.conv;since=0;log.innerHTML="";return poll();}
+    conv=s.conv;
+    s.events.forEach(e=>{addEvent(e);since=Math.max(since,e.seq);});
+    if(s.events.length&&log.lastElementChild)log.lastElementChild.scrollIntoView({block:"nearest"});
+    renderKey(s.key_set);
+    renderPending(s.pending);
+    busy.classList.toggle("hidden",!s.busy||!!s.pending);
+    sendBtn.disabled=!!s.busy||!s.key_set;
+    const u=s.usage||{};
+    usage.textContent=(u.input||u.output)?`${s.model} · ${Math.round((u.input+u.cache_read+u.cache_write)/1000)}k Eingabe-/${(u.output/1000).toFixed(1)}k Ausgabe-Tokens · ${u.web_searches||0} Suchen · ca. ${(u.usd||0).toFixed(2)} $`:"";
+    // Poll only while something is happening: polling keeps the session
+    // active, which would otherwise hold off the vault's auto-lock forever.
+    if(s.busy||s.pending)ASSIST_TIMER=setTimeout(poll,1500);
+  }
+  async function send(){
+    const t=ta.value.trim();if(!t)return;
+    sendBtn.disabled=true;
+    const r=await jpost("api/assistant/send",{text:t});
+    if(r.ok)ta.value="";else toast("✗ "+(r.error||"Fehler"));
+    poll();
+  }
+  sendBtn.onclick=send;
+  ta.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}});
+  resetBtn.onclick=async()=>{if(!confirm("Gespräch und Zwischenspeicher leeren?"))return;await jpost("api/assistant/reset",{});poll();};
+  poll();
+}
+
 /* ---------------- Videos ---------------- */
 async function viewVideos(m){
   m.append(el("h2","title","Videos"));
@@ -540,6 +652,23 @@ async function viewVideos(m){
 }
 
 /* ---------------- Diagnose ---------------- */
+// Ported from marcone/teslausb#1044: two consecutive tx_bytes samples
+// (summed across all real interfaces) give a throughput estimate. Stops
+// polling once the tile it's updating is no longer in the DOM (page
+// navigated away) instead of running forever in the background.
+let _lastTxSample=null;
+async function pollUploadThroughput(valEl){
+  if(!document.body.contains(valEl))return;
+  try{
+    const s=await jget("api/net_tx_bytes");
+    if(_lastTxSample){
+      const dt=s.sample_ms-_lastTxSample.sample_ms, db=s.tx_bytes-_lastTxSample.tx_bytes;
+      valEl.textContent=(dt>0&&db>=0)?human(db*1000/dt)+"/s":"–";
+    }
+    _lastTxSample=s;
+  }catch(e){valEl.textContent="–";}
+  setTimeout(()=>pollUploadThroughput(valEl),1000);
+}
 async function viewDiag(m){
   m.append(el("h2","title","Diagnose"));
   const stats=el("div","stats");m.append(stats);
@@ -549,6 +678,9 @@ async function viewDiag(m){
   const items=[["Temperatur",d.temp||"–"],["Uptime",d.uptime||"–"],["WLAN",d.wifi_ssid||"–"],
     ["USB am Auto",d.gadget_active?"aktiv":"—"],["Clips",s.clips],["verschlüsselt",s.encrypted]];
   items.forEach(([k,v])=>{const c=el("div","stat");c.append(el("div","k",k));c.append(el("div","v",String(v)));stats.append(c);});
+  const uploadTile=el("div","stat");uploadTile.append(el("div","k","Upload"));
+  const uploadVal=el("div","v","…");uploadTile.append(uploadVal);stats.append(uploadTile);
+  pollUploadThroughput(uploadVal);
   const actions=el("div","saverow");
   const rb=el("button","btn sm","♻️ Neustart");rb.onclick=async()=>{if(confirm("Pi neu starten?")){await jpost("api/reboot",{});toast("Startet neu…");}};
   const td=el("button","btn sm ghost","🔀 Laufwerke togglen");td.onclick=async()=>{await jpost("api/toggle_drives",{});toast("getoggelt");};
@@ -558,11 +690,180 @@ async function viewDiag(m){
   const box=el("div","logbox","lädt…");
   const load=async()=>{const r=await jget("api/log?which="+sel.value);box.textContent=r.text||"(leer)";box.scrollTop=box.scrollHeight;};
   sel.onchange=load;const f=el("div","field");f.append(sel);logcard.append(f,box);load();
+  const hub=el("div","card");m.append(hub);hubUpdateCard(hub);
+  const upd=el("div","card");m.append(upd);osUpdateCard(upd);
+  const bt=el("div","card");m.append(bt);bootCard(bt);
+}
+async function bootCard(card){
+  card.innerHTML=`<h3>Startzeiten</h3>
+    <div class="note">Sekunden ab Einschalten. „Laufwerke“ = bis das Auto die USB-Laufwerke eingebunden hat (– wenn kein Auto als USB-Host dran war). „Ende“ = wie der jeweilige Lauf endete: sauber heruntergefahren oder Strom weg – im Auto der Normalfall.</div>
+    <div class="note bt_head">lädt…</div><div class="bt_list"></div>`;
+  const q=s=>card.querySelector(s);
+  let r;try{r=await jget("api/boottimes");}catch(e){q(".bt_head").textContent="✗ Fehler beim Laden";return;}
+  const fmt=v=>v==null?"–":v.toLocaleString("de-DE",{minimumFractionDigits:1,maximumFractionDigits:1})+" s";
+  const when=t=>t?new Date(t*1000).toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"}):"?";
+  const b=r.boots||[];
+  if(!b.length){q(".bt_head").textContent="Noch keine Messwerte – sie werden etwa eine Minute nach dem Hub-Start erfasst.";return;}
+  const c=b[0];
+  q(".bt_head").textContent=`${c.boot_id===r.current?"Aktueller Start":"Letzter Start"} (${when(c.booted_at)}): Laufwerke fürs Auto nach ${fmt(c.drives_s)} · WLAN ${fmt(c.wifi_s)} · Hub ${fmt(c.hub_s)} · Start fertig ${fmt(c.finished_s)}`;
+  const t=el("table","tlist"),body=el("tbody");
+  [["Start","Laufwerke","WLAN","Hub","Fertig","Ende"]].concat(b.map(x=>[when(x.booted_at),fmt(x.drives_s),fmt(x.wifi_s),fmt(x.hub_s),fmt(x.finished_s),
+    x.boot_id===r.current?"läuft":(x.clean_end?"sauber":"Strom weg")]))
+    .forEach(row=>{const tr=el("tr");row.forEach(v=>{const td=el("td");td.textContent=v;tr.append(td);});body.append(tr);});
+  t.append(body);q(".bt_list").append(t);
+}
+function hubUpdateCard(card){
+  card.innerHTML=`<h3>Hub-Software</h3>
+    <div class="note hu_status">lädt…</div>
+    <div class="note warn hu_result hidden"></div>
+    <details class="hu_noteswrap hidden"><summary class="note hu_notestitle">Änderungen</summary><div class="note hu_notes" style="white-space:pre-wrap"></div></details>
+    <div class="note">Vor jedem Update sichert der Hub Programm, Einstellungen, WLAN-Profile und Tresor nach <code>/backingfiles/hub-backups</code> (die letzten 3). Schlägt die Installation fehl oder antwortet der Hub danach nicht, stellt er die vorherige Version selbst wieder her. Installieren geht nur im Heim-WLAN; der Hub startet dabei neu, danach bitte neu anmelden.</div>
+    <div class="saverow"><button class="btn sm ghost hu_check">Nach Updates suchen</button>
+      <button class="btn sm hidden hu_go">Update installieren</button></div>
+    <div class="logbox hidden hu_log"></div>
+    <details class="hu_bkwrap hidden"><summary class="note">Sicherungen</summary><div class="note hu_bk"></div></details>`;
+  const q=s=>card.querySelector(s);
+  const when=t=>t?new Date((typeof t==="number"?t*1000:t)).toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"}):"";
+  let last=null;
+  function render(s){
+    last=s;const l=s.latest;
+    let txt=`Installiert: ${s.installed}`;
+    if(s.running)txt+=` · ⏳ Update auf ${(s.run&&s.run.tag)||"?"}: ${(s.run&&s.run.phase)||"läuft"}… (Pi nicht vom Strom trennen)`;
+    else if(s.available)txt+=` · 🆕 Update verfügbar: ${l.tag}${l.published?" vom "+when(l.published):""}`;
+    else if(l&&l.tag)txt+=` · ✓ aktuell (neueste Version ${l.tag})`;
+    if(s.check_error)txt+=` · ✗ ${s.check_error}`;
+    else if(!s.checked)txt+=" · noch nicht gesucht";
+    if(s.checked)txt+=` · geprüft ${when(s.checked)}`;
+    q(".hu_status").textContent=txt;
+    const r=s.run;
+    const showResult=!s.running&&r&&r.finished&&r.ok===false;
+    q(".hu_result").classList.toggle("hidden",!showResult);
+    if(showResult)q(".hu_result").textContent=`✗ Update auf ${r.tag} am ${when(r.finished)}: ${r.error||"fehlgeschlagen"}`;
+    else if(!s.running&&r&&r.ok===true&&r.finished){q(".hu_status").textContent+=` · letztes Update auf ${r.tag} am ${when(r.finished)} ✓`;}
+    q(".hu_noteswrap").classList.toggle("hidden",!(l&&l.notes));
+    if(l){q(".hu_notestitle").textContent=`Änderungen in ${l.tag}`;q(".hu_notes").textContent=l.notes||"";}
+    q(".hu_go").classList.toggle("hidden",s.running||!s.available);
+    q(".hu_go").textContent=s.available?`Update auf ${l.tag} installieren`:"Update installieren";
+    q(".hu_check").disabled=!!s.running;
+    const lg=q(".hu_log"),tail=s.tail||[];
+    lg.classList.toggle("hidden",!(tail.length&&(s.running||showResult)));
+    lg.textContent=tail.join("\n");lg.scrollTop=lg.scrollHeight;
+    const bk=s.backups||[];
+    q(".hu_bkwrap").classList.toggle("hidden",!bk.length);
+    q(".hu_bk").textContent=bk.map(b=>`${b.name} · ${(b.size/1048576).toFixed(1)} MB · ${when(b.t)}`).join("\n");
+    q(".hu_bk").style.whiteSpace="pre-wrap";
+    updateNavBadge(s);
+  }
+  async function refresh(){
+    if(!document.body.contains(card))return;
+    let s;try{s=await jget("api/hub/update_status");}catch(e){if(last&&last.running)setTimeout(refresh,4000);return;}
+    render(s);if(s.running)setTimeout(refresh,3000);
+  }
+  q(".hu_check").onclick=async()=>{
+    q(".hu_check").disabled=true;q(".hu_status").textContent="frage GitHub…";
+    try{render(await jpost("api/hub/update_check",{}));}catch(e){toast("✗ Verbindungsfehler");}
+    q(".hu_check").disabled=false;
+  };
+  q(".hu_go").onclick=async()=>{
+    const l=last&&last.latest;if(!l)return;
+    if(!confirm(`Update auf ${l.tag} installieren?\n\nZuerst wird eine Sicherung angelegt, dann das Paket geladen, geprüft und installiert. Der Hub startet dabei neu – danach neu anmelden. Der Pi darf währenddessen nicht vom Strom getrennt werden.`))return;
+    const r=await jpost("api/hub/update_install",{});
+    if(!r.ok){toast("✗ "+(r.error||"Fehler"));return;}
+    refresh();
+  };
+  refresh();
+}
+function updateNavBadge(s){
+  const nav=document.querySelector('nav .nav[data-view="diag"]');if(!nav)return;
+  let b=nav.querySelector(".navbadge");
+  if(s&&s.available){
+    if(!b){b=el("span","navbadge","Update");nav.append(b);}
+    b.title=`Hub-Update ${s.latest.tag} verfügbar`;
+  }else if(b)b.remove();
+}
+async function checkHubUpdateHint(){
+  try{
+    const s=await jget("api/hub/update_status");updateNavBadge(s);
+    if(s.available&&!sessionStorage.getItem("hubUpdateToast")){
+      sessionStorage.setItem("hubUpdateToast","1");
+      toast(`Hub-Update ${s.latest.tag} verfügbar – siehe Diagnose`);
+    }
+  }catch(e){}
+}
+function osUpdateCard(card){
+  card.innerHTML=`<h3>Betriebssystem-Updates</h3>
+    <div class="note">Suchen ist jederzeit gefahrlos – die Systempartition bleibt dabei schreibgeschützt. Installieren geht nur im Heim-WLAN (kein Download über mobile Daten).</div>
+    <div class="note warn">⚠ Fällt der Strom mitten im Update weg, kann das System Schaden nehmen. Im Auto heißt das: Das Auto muss die ganze Zeit wach bleiben (z. B. Wächter-Modus an), sonst schaltet es den USB-Strom ab. Am sichersten am Netzteil.</div>
+    <div class="note os_status">lädt…</div>
+    <div class="note warn os_audit hidden">⚠ Eine frühere Installation wurde unterbrochen – „Jetzt installieren“ bringt sie zu Ende.</div>
+    <details class="os_listwrap hidden"><summary class="note">Pakete anzeigen</summary><div class="note os_list"></div></details>
+    <div class="saverow"><button class="btn sm ghost os_check">Nach Updates suchen</button>
+      <button class="btn sm hidden os_go">Jetzt installieren</button>
+      <button class="btn sm hidden os_reboot">♻️ Neustart</button></div>
+    <div class="logbox hidden os_log"></div>`;
+  const q=s=>card.querySelector(s);
+  const when=t=>t?new Date(t*1000).toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"}):"";
+  let last=null;
+  function render(s){
+    last=s;const n=(s.updates||[]).length;
+    let txt;
+    if(s.running)txt="⏳ "+(s.phase||"läuft")+"… (Pi bitte nicht vom Strom trennen)";
+    else if(s.check_error)txt="✗ "+s.check_error;
+    else if(!s.checked)txt="Noch nicht gesucht.";
+    else txt=(n?`${n} Update${n>1?"s":""} verfügbar`+(s.security?` (davon ${s.security} Sicherheit)`:""):"✓ System ist aktuell")+" · geprüft "+when(s.checked);
+    if(!s.running&&s.finished)txt+=" · letzte Installation "+when(s.finished)+": "+(s.ok?"✓ erfolgreich":"✗ "+(s.error||"fehlgeschlagen"));
+    q(".os_status").textContent=txt;
+    q(".os_audit").classList.toggle("hidden",!s.audit||s.running);
+    q(".os_listwrap").classList.toggle("hidden",!n);
+    q(".os_list").innerHTML="";
+    (s.updates||[]).forEach(u=>{const d=el("div");d.textContent=`${u.security?"🔒 ":""}${u.pkg}  ${u.from||"neu"} → ${u.to}`;q(".os_list").append(d);});
+    q(".os_go").classList.toggle("hidden",s.running||!(n||s.audit));
+    q(".os_check").disabled=!!s.running;
+    q(".os_reboot").classList.toggle("hidden",s.running||!s.reboot_recommended||!s.finished);
+    const lg=q(".os_log");lg.classList.toggle("hidden",!(s.tail||[]).length);
+    lg.textContent=(s.tail||[]).join("\n");lg.scrollTop=lg.scrollHeight;
+  }
+  async function refresh(){
+    if(!document.body.contains(card))return;
+    let s;try{s=await jget("api/os/status");}catch(e){return;}
+    render(s);if(s.running)setTimeout(refresh,2000);
+  }
+  q(".os_check").onclick=async()=>{
+    q(".os_check").disabled=true;q(".os_status").textContent="suche… (kann 1–2 Minuten dauern)";
+    const r=await jpost("api/os/check",{});
+    if(r.status)render(r.status);
+    if(!r.ok)toast("✗ "+(r.error||"Fehler"));
+    q(".os_check").disabled=false;
+  };
+  q(".os_go").onclick=async()=>{
+    const n=(last&&last.updates||[]).length;
+    if(!confirm(`${n?n+" Pakete":"Unterbrochene Installation"} jetzt installieren?\n\nDer Pi darf währenddessen nicht vom Strom getrennt werden. Dauert je nach Umfang einige Minuten.`))return;
+    const r=await jpost("api/os/upgrade",{});
+    if(!r.ok){toast("✗ "+(r.error||"Fehler"));return;}
+    refresh();
+  };
+  q(".os_reboot").onclick=async()=>{if(confirm("Pi jetzt neu starten?")){await jpost("api/reboot",{});toast("Startet neu…");}};
+  refresh();
 }
 
 /* ---------------- Einstellungen ---------------- */
 function fld(label,id,type,val,ph){return `<div class="field"><label>${label}</label><input id="${id}" type="${type||'text'}" value="${val==null?'':String(val).replace(/"/g,'&quot;')}" ${ph?`placeholder="${ph}"`:''}></div>`;}
 function chk(label,id,on){return `<label class="checkline"><input type="checkbox" id="${id}" ${on?'checked':''}> ${label}</label>`;}
+function syncHoldText(h){
+  if(!h)return "";
+  if(!h.enabled)return "aus";
+  const dur=s=>{const m=Math.round((s||0)/60);return m>=60?`${Math.floor(m/60)}h ${m%60}min`:`${m} min`;};
+  const open=(h.waiting_for||[]).join(" + ");
+  if(h.phase==="holding")
+    return `aktiv seit ${dur(h.elapsed_sec)} – wartet auf: ${open||"Abschluss"} (Limit in ${dur(h.remaining_sec)})`
+      +(h.failing?" – ⚠️ Weck-Befehl schlägt gerade fehl, wird weiter versucht":"");
+  if(h.phase==="ended"){
+    if(h.end_reason==="complete")return `fertig nach ${dur(h.ended_after_sec)} – Auto darf schlafen`;
+    if(h.end_reason==="timeout")return `Limit von ${h.max_min} min erreicht, noch offen: ${open} – Auto darf schlafen`;
+    return "für diesen Besuch beendet – Auto darf schlafen";
+  }
+  return "bereit – greift, sobald Heim-WLAN und NAS erreichbar sind";
+}
 /* ---------------- Fahrzeug (BLE) ---------------- */
 async function viewBle(m){
   m.append(el("h2","title","Fahrzeug (BLE)"));
@@ -574,13 +875,17 @@ async function viewBle(m){
     </div>
     <div class="card"><h3>Auto wach halten</h3>
       <div class="note">Sendet alle 5 Minuten per BLE einen <code>wake</code>-Befehl ans Auto, damit es nicht einschläft -- z.&nbsp;B. während einer längeren Aufräum-/Reinigungsaktion. (<code>keep-accessory-power</code> allein reicht dafür nicht: laut Tesla gilt das nicht für den von Dashcam/USB genutzten Datenport -- das haben wir in der Praxis auch so beobachtet, deshalb der periodische Nudge statt eines einmaligen Befehls.) Schaltet sich nach der eingestellten Zeit automatisch wieder aus, "Jetzt beenden" geht jederzeit vorzeitig. Braucht den gekoppelten <b>Wachhalten</b>-Schlüssel unten.</div>
+      <div class="note" style="margin-top:8px">⚠️ <b>Gemessen am 13.09.2026:</b> <code>wake</code> weckt das Auto nur für 1–4 Minuten, ein weiterer <code>wake</code> an das wache Auto verlängert das nicht. Selbst im Minutentakt schlief das verriegelte Auto zwischendurch ein. Diese Funktion und das Synchronisieren vor dem Einschlafen halten das Auto deshalb derzeit <b>nicht zuverlässig</b> wach.</div>
       <div class="saverow"><span class="note" id="keepawake_status">lädt…</span></div>
       <div class="saverow" style="flex-wrap:wrap">
-        <input type="number" id="keepawake_hours" value="24" min="1" max="72" style="width:70px;padding:10px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--text)">
+        <input type="number" id="keepawake_hours" value="24" min="1" max="48" style="width:70px;padding:10px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:10px;color:var(--text)">
         <span class="note">Stunden</span>
         <button class="btn sm" id="keepawake_on">Einschalten</button>
         <button class="btn sm ghost" id="keepawake_off" style="display:none">Jetzt beenden</button>
       </div>
+      <div class="note" style="margin-top:14px"><b>Vor dem Einschlafen synchronisieren:</b> Sobald das Heim-WLAN verbunden und das NAS erreichbar ist, versucht der Hub, das Auto wach zu halten (alle 2 Minuten <code>wake</code>, siehe Hinweis oben), bis die Archivierung und danach ein vollständiger NAS-Abgleich durch sind – höchstens ${c.sync_hold_max_min||120} Minuten, danach darf es schlafen.</div>
+      ${chk("Vor dem Einschlafen komplett synchronisieren","synchold_enabled",c.sync_hold_enabled!=='false')}
+      <div class="saverow"><span class="note" id="synchold_status">lädt…</span><span class="note" id="synchold_msg"></span></div>
     </div>
     <div class="card"><h3>BLE-Programme</h3>
       <div class="note">Die offiziellen Tesla-Kommandozeilenwerkzeuge (<code>tesla-control</code>, <code>tesla-keygen</code>), mit denen BLE-Schlüssel erzeugt und gekoppelt werden.</div>
@@ -755,12 +1060,16 @@ async function viewBle(m){
     const onBtn=$("#keepawake_on"),offBtn=$("#keepawake_off"),hoursInp=$("#keepawake_hours");
     if(r.active){
       const h=Math.floor(r.remaining_sec/3600),mn=Math.floor((r.remaining_sec%3600)/60);
-      statusEl.textContent=`aktiv – noch ${h}h ${mn}min`;
+      statusEl.textContent=r.failing
+        ? `aktiv – noch ${h}h ${mn}min (⚠️ Weck-Befehl schlägt gerade fehl, wird weiter versucht)`
+        : `aktiv – noch ${h}h ${mn}min`;
       onBtn.style.display="none";offBtn.style.display="";hoursInp.disabled=true;
     }else{
       statusEl.textContent="aus";
       onBtn.style.display="";offBtn.style.display="none";hoursInp.disabled=false;
     }
+    const holdEl=$("#synchold_status");
+    if(holdEl)holdEl.textContent=syncHoldText(r.sync_hold);
     if(document.body.contains(statusEl))setTimeout(refreshKeepAwake,30000);
   }
   $("#keepawake_on").onclick=async()=>{
@@ -768,6 +1077,7 @@ async function viewBle(m){
     try{
       const r=await jpost("api/keepawake/start",{hours:Number($("#keepawake_hours").value)||24});
       if(!r.ok)toast("✗ "+(r.error||"Fehler"));
+      else if(r.warning)toast("⚠️ Aktiviert, aber: "+r.warning);
       refreshKeepAwake();
     }catch(e){toast("✗ Verbindungsfehler");}
   };
@@ -778,6 +1088,14 @@ async function viewBle(m){
       if(!r.ok)toast("✗ "+(r.error||r.detail||"Fehler"));
       refreshKeepAwake();
     }catch(e){toast("✗ Verbindungsfehler");}
+  };
+  $("#synchold_enabled").onchange=async e=>{
+    $("#synchold_msg").textContent="speichere…";
+    try{
+      const r=await jpost("api/settings",{sync_hold_enabled:e.target.checked});
+      $("#synchold_msg").textContent=r.ok?"✓ gespeichert":"✗ "+(r.error||"Fehler");
+      refreshKeepAwake();
+    }catch(err){$("#synchold_msg").textContent="✗ Verbindungsfehler";}
   };
   refreshKeepAwake();
 }
@@ -921,13 +1239,13 @@ async function viewCanbus(m){
 }
 
 /* ---------------- Fahrten & Log ---------------- */
-const TRIP_EVENT_ICONS={wifi:"📶",usb:"🔌",temp:"🌡️",trip:"🚗",ble:"🔵"};
+const TRIP_EVENT_ICONS={wifi:"📶",usb:"🔌",temp:"🌡️",trip:"🚗",ble:"🔵",power:"⚡"};
 async function viewTrips(m){
   m.append(el("h2","title","Fahrten & Log"));
   let c={};try{c=await jget("api/settings");}catch(e){}
   const box=el("div");box.innerHTML=`
     <div class="card"><h3>Blackbox-Modus</h3>
-      <div class="note">Zeichnet automatisch Position/Route auf, sobald eine Fahrt erkannt wird (Schaltstellung ≠ Parken), und beendet die Aufzeichnung, wenn wieder geparkt wird. Braucht einen gekoppelten BLE-Schlüssel.</div>
+      <div class="note">Zeichnet automatisch Position/Route auf, sobald eine Fahrt erkannt wird (Schaltstellung ≠ Parken), und beendet die Aufzeichnung, wenn wieder geparkt wird. Braucht einen gekoppelten BLE-Schlüssel. Die Punkte werden sofort verschlüsselt gespeichert; ansehen, exportieren und aufs NAS übertragen geht nur mit entsperrtem Tresor.</div>
       ${chk("Fahrten automatisch aufzeichnen","trip_blackbox_enabled",c.blackbox_enabled==='true')}
       <div class="saverow"><span class="note" id="trip_bbmsg"></span><span class="note" id="trip_active_status">lädt…</span></div>
     </div>
@@ -941,8 +1259,13 @@ async function viewTrips(m){
       <div class="note">Wichtige Ereignisse. Mit gekoppeltem BLE detaillierter (Fahrt-Start/-Ende, Verriegelung, Ladezustand), ohne BLE nur WLAN-/USB-Verbindungswechsel und Temperatur-Warnungen.</div>
       <div id="events_list" class="note">lädt…</div>
     </div>
-    <div class="card"><h3>Temperatur</h3>
-      <div class="saverow"><span id="temp_current">lädt…</span></div>
+    <div class="card"><h3>Pi-Temperatur</h3>
+      <div class="saverow" style="flex-wrap:wrap">
+        <div class="seg" id="temp_range"><button data-h="6">6 h</button><button data-h="24" class="on">24 h</button><button data-h="168">7 Tage</button><button data-h="720">30 Tage</button></div>
+        <span class="note" id="temp_current">lädt…</span>
+      </div>
+      <div class="tchart" id="temp_chart" tabindex="0" aria-label="Verlauf der Pi-Temperatur; Pfeiltasten wählen einen Messpunkt"></div>
+      <details class="note"><summary>Werte als Tabelle</summary><div id="temp_table"></div></details>
       <div class="saverow"><a href="api/temperature/download" class="btn sm ghost" download>Log herunterladen</a></div>
     </div>`;
   m.append(box);
@@ -966,7 +1289,8 @@ async function viewTrips(m){
     const tr=await jget("api/blackbox/trips");
     $("#trip_active_status").textContent=tr.active?"🔴 Fahrt wird gerade aufgezeichnet":"⚪ Keine aktive Fahrt";
     const list=$("#trips_list");
-    if(!tr.trips||!tr.trips.length){list.textContent="Noch keine aufgezeichneten Fahrten.";}
+    if(tr.locked){list.textContent="🔒 Tresor gesperrt – die Fahrten sind verschlüsselt und nach dem Anmelden sichtbar.";}
+    else if(!tr.trips||!tr.trips.length){list.textContent="Noch keine aufgezeichneten Fahrten.";}
     else{
       list.innerHTML=`<table class="probe"><tbody>${tr.trips.map(t=>`
         <tr>
@@ -983,6 +1307,7 @@ async function viewTrips(m){
     if(!el2)return;
     if(!s.t){el2.textContent="noch nicht synchronisiert";}
     else if(!s.ok){el2.textContent="✗ "+(s.error||"Fehler");}
+    else if(s.locked){el2.textContent="🔒 wartet auf Anmeldung (Fahrten sind verschlüsselt)";}
     else{el2.textContent="✓ übertragen ("+s.uploaded+" neu, "+new Date(s.t*1000).toLocaleTimeString()+")";}
   };
   refreshTripSyncStatus();
@@ -1004,10 +1329,128 @@ async function viewTrips(m){
     }
   }catch(e){$("#events_list").textContent="✗ Fehler beim Laden";}
 
-  try{
-    const s=await jget("api/status");
-    $("#temp_current").textContent="Aktuell: "+((s.diag||{}).temp||"–");
-  }catch(e){$("#temp_current").textContent="✗ Fehler beim Laden";}
+  tempChart();
+}
+
+/* Pi temperature chart: one series (per-bucket average) over time, a faint
+   min–max band once a bucket spans more than one reading, gaps where the Pi
+   was off (the car cut its USB power), crosshair + tooltip on hover/touch
+   and via arrow keys. Every value is also in the table and the raw log. */
+const TEMP_LINES=[[75,"75 °C Hub-Warnung"],[80,"80 °C Drosselung"]];
+function fmtC(v){return v.toLocaleString("de-DE",{minimumFractionDigits:1,maximumFractionDigits:1});}
+async function tempChart(){
+  const box=$("#temp_chart");if(!box)return;
+  let hours=24,data=null,sel=-1,lastW=0,hover={show:()=>{},hide:()=>{},n:0};
+  const tt=el("div","tt hidden");
+  const xt=p=>p.t+data.bucket_sec/2;   // bucket start -> bucket middle
+  const fmtT=(t,withDate)=>new Date(t*1000).toLocaleString("de-DE",withDate?
+    {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}:{hour:"2-digit",minute:"2-digit"});
+  async function load(){
+    if(data)box.style.opacity=".5";   // refetch keeps the previous frame
+    try{data=await jget("api/temperature/series?hours="+hours);}catch(e){box.style.opacity="";return;}
+    box.style.opacity="";sel=-1;draw();header();table();
+  }
+  function header(){
+    const pts=data.points,cur=$("#temp_current");
+    if(!pts.length){cur.textContent="Keine Messwerte in diesem Zeitraum.";return;}
+    const lo=Math.min(...pts.map(p=>p.min)),hi=Math.max(...pts.map(p=>p.max)),L=data.latest;
+    const age=Date.now()/1000-L.t;
+    cur.textContent=(age<300?"Aktuell ":"Zuletzt ("+fmtT(L.t,true)+") ")+fmtC(L.temp)+" °C · Min "+fmtC(lo)+" · Max "+fmtC(hi)+" °C";
+  }
+  function draw(){
+    box.innerHTML="";box.append(tt);tt.classList.add("hidden");
+    const pts=data.points;
+    if(!pts.length){box.append(el("div","empty","Keine Messwerte in diesem Zeitraum."));hover={show:()=>{},hide:()=>{},n:0};return;}
+    const W=Math.max(280,box.clientWidth);lastW=box.clientWidth;
+    const H=Math.round(Math.min(260,Math.max(180,W*0.4))),m={l:34,r:12,t:12,b:24};
+    const t1=Date.now()/1000,t0=t1-hours*3600;
+    let lo=Math.min(...pts.map(p=>p.min)),hi=Math.max(...pts.map(p=>p.max));
+    lo=Math.floor((lo-2)/5)*5;hi=Math.ceil((hi+2)/5)*5;if(hi-lo<10)hi=lo+10;
+    const X=t=>m.l+(t-t0)/(t1-t0)*(W-m.l-m.r),Y=v=>m.t+(hi-v)/(hi-lo)*(H-m.t-m.b);
+    const NS="http://www.w3.org/2000/svg",svg=document.createElementNS(NS,"svg");
+    svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("aria-hidden","true");
+    const add=(tag,attrs)=>{const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);svg.append(n);return n;};
+    const label=(x,y,s,anchor)=>{const n=add("text",{x,y,"text-anchor":anchor,fill:"var(--axis)","font-size":11});n.textContent=s;};
+    const step=hi-lo>25?10:5;
+    for(let v=lo;v<=hi;v+=step){add("line",{x1:m.l,x2:W-m.r,y1:Y(v),y2:Y(v),stroke:"var(--grid)","stroke-width":1});label(m.l-6,Y(v)+4,String(v),"end");}
+    // x ticks on local hour/day boundaries
+    const daily=hours>24,every=hours<=6?1:hours<=24?4:hours<=168?1:5;
+    const d=new Date(t0*1000);d.setMinutes(0,0,0);if(daily)d.setHours(0);
+    for(let i=0;d.getTime()/1000<=t1;i++){
+      const t=d.getTime()/1000,x=X(t);
+      if(t>=t0&&(daily?i%every===0:d.getHours()%every===0)&&x>m.l+12&&x<W-m.r-16){
+        add("line",{x1:x,x2:x,y1:H-m.b,y2:H-m.b+4,stroke:"var(--grid)","stroke-width":1});
+        label(x,H-6,daily?d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"}):String(d.getHours()).padStart(2,"0")+":00","middle");
+      }
+      if(daily)d.setDate(d.getDate()+1);else d.setHours(d.getHours()+1);
+    }
+    TEMP_LINES.forEach(([v,s])=>{if(v>lo&&v<=hi){
+      add("line",{x1:m.l,x2:W-m.r,y1:Y(v),y2:Y(v),stroke:"var(--axis)","stroke-width":1,"stroke-opacity":.45});
+      label(W-m.r-2,Y(v)-4,s,"end");}});
+    // split where readings are missing, so a power gap isn't drawn as a line
+    const gap=Math.max(3*data.bucket_sec,180),segs=[];let cur=[];
+    pts.forEach((p,k)=>{if(cur.length&&p.t-pts[k-1].t>gap){segs.push(cur);cur=[];}cur.push(p);});
+    segs.push(cur);
+    segs.forEach(s=>{
+      if(data.bucket_sec>60&&s.length>1)
+        add("polygon",{points:s.map(p=>`${X(xt(p))},${Y(p.max)}`).concat(s.slice().reverse().map(p=>`${X(xt(p))},${Y(p.min)}`)).join(" "),
+          fill:"var(--series-1)","fill-opacity":.14});
+      if(s.length===1)add("circle",{cx:X(xt(s[0])),cy:Y(s[0].avg),r:2,fill:"var(--series-1)"});
+      else add("polyline",{points:s.map(p=>`${X(xt(p))},${Y(p.avg)}`).join(" "),fill:"none",stroke:"var(--series-1)",
+        "stroke-width":2,"stroke-linejoin":"round","stroke-linecap":"round"});
+    });
+    const last=pts[pts.length-1];
+    add("circle",{cx:X(xt(last)),cy:Y(last.avg),r:4,fill:"var(--series-1)",stroke:"var(--card)","stroke-width":2});
+    const cross=add("line",{y1:m.t,y2:H-m.b,stroke:"var(--axis)","stroke-width":1,visibility:"hidden"});
+    const dot=add("circle",{r:4,fill:"var(--series-1)",stroke:"var(--card)","stroke-width":2,visibility:"hidden"});
+    const hit=add("rect",{x:m.l,y:0,width:W-m.l-m.r,height:H,fill:"transparent"});
+    const xs=pts.map(p=>X(xt(p)));
+    const show=k=>{
+      sel=k;const p=pts[k],x=xs[k];
+      cross.setAttribute("x1",x);cross.setAttribute("x2",x);cross.setAttribute("visibility","visible");
+      dot.setAttribute("cx",x);dot.setAttribute("cy",Y(p.avg));dot.setAttribute("visibility","visible");
+      tt.innerHTML="";const b=el("b");b.textContent=fmtC(p.avg)+" °C";tt.append(b,document.createTextNode(fmtT(xt(p),daily)));
+      if(data.bucket_sec>60){tt.append(el("br"),document.createTextNode("Ø "+Math.round(data.bucket_sec/60)+" Min · "+fmtC(p.min)+"–"+fmtC(p.max)+" °C"));}
+      tt.classList.remove("hidden");
+      const bw=box.clientWidth,px=x/W*bw;
+      tt.style.left=Math.max(0,Math.min(px+12,bw-tt.offsetWidth-4))+"px";
+    };
+    const hide=()=>{sel=-1;cross.setAttribute("visibility","hidden");dot.setAttribute("visibility","hidden");tt.classList.add("hidden");};
+    const nearest=cx=>{const r=svg.getBoundingClientRect(),x=(cx-r.left)/r.width*W;
+      let a=0,z=xs.length-1;while(z-a>1){const mid=(a+z)>>1;if(xs[mid]<x)a=mid;else z=mid;}
+      return Math.abs(xs[a]-x)<=Math.abs(xs[z]-x)?a:z;};
+    hit.addEventListener("pointermove",e=>show(nearest(e.clientX)));
+    hit.addEventListener("pointerdown",e=>show(nearest(e.clientX)));
+    hit.addEventListener("pointerleave",()=>{if(document.activeElement!==box)hide();});
+    hover={show,hide,n:pts.length};
+    box.append(svg);
+  }
+  function table(){
+    const det=box.parentElement.querySelector("details"),tb=$("#temp_table");
+    tb.innerHTML="";
+    const fill=()=>{
+      if(!det.open||tb.childElementCount||!data.points.length)return;
+      const t=el("table","tlist"),body=el("tbody");
+      [["Zeit","Ø °C","Min","Max"]].concat(data.points.slice().reverse().map(p=>[fmtT(xt(p),true),fmtC(p.avg),fmtC(p.min),fmtC(p.max)]))
+        .forEach(r=>{const tr=el("tr");r.forEach(v=>{const td=el("td");td.textContent=v;tr.append(td);});body.append(tr);});
+      t.append(body);tb.append(t);
+    };
+    det.ontoggle=fill;fill();
+  }
+  box.addEventListener("keydown",e=>{
+    if(!hover.n)return;
+    if(e.key==="ArrowLeft"||e.key==="ArrowRight"){e.preventDefault();
+      hover.show(sel<0?hover.n-1:Math.max(0,Math.min(hover.n-1,sel+(e.key==="ArrowRight"?1:-1))));}
+    else if(e.key==="Escape")hover.hide();
+  });
+  box.addEventListener("focus",()=>{if(sel<0&&hover.n)hover.show(hover.n-1);});
+  box.addEventListener("blur",()=>hover.hide());
+  document.querySelectorAll("#temp_range button").forEach(b=>b.onclick=()=>{
+    document.querySelectorAll("#temp_range button").forEach(x=>x.classList.toggle("on",x===b));
+    hours=+b.dataset.h;load();
+  });
+  new ResizeObserver(()=>{if(data&&document.body.contains(box)&&box.clientWidth!==lastW)draw();}).observe(box);
+  load();
 }
 
 async function viewSettings(m){
@@ -1033,6 +1476,12 @@ async function viewSettings(m){
       ${chk("RecentClips archivieren","s_archive_recentclips",c.archive_recentclips==='true')}
       ${chk("SavedClips archivieren","s_archive_savedclips",c.archive_savedclips==='true')}
       ${chk("SentryClips archivieren","s_archive_sentryclips",c.archive_sentryclips==='true')}
+      ${chk("Auf dem NAS gelöschte Clips nicht erneut übertragen","s_nas_skip_deleted",c.nas_skip_deleted!=='false')}
+      <div class="note">Wer auf dem NAS Clips löscht (z.&nbsp;B. um Platz zu sparen), bekommt sie nicht wieder hochgeladen; in der Übersicht stehen sie als „🗑 auf NAS gelöscht“ und zählen als erledigt. Ausgeschaltet überträgt der nächste Archivlauf sie erneut, solange sie lokal noch vorhanden sind.</div>
+      ${fld("SavedClips: nur letzte N Minuten je Event archivieren (0 = alles)","s_archive_savedclips_last_minutes","number",c.archive_savedclips_last_minutes||"0")}
+      <div class="note">Ein "gespeichertes" Tesla-Event kann mehrere Minuten Videomaterial rund um den Auslöser umfassen. Bei &gt;0 wird pro Event-Ordner nur der zuletzt aufgenommene Teil (die letzten N Minuten) zum NAS übertragen, um Zeit/Speicherplatz zu sparen. <b>Wichtig:</b> der ältere, nicht übertragene Teil wird dabei als "bereits erledigt" markiert und nie nachträglich archiviert — er bleibt nur so lange auf dem Stick, bis er irgendwann überschrieben wird, nicht dauerhaft gesichert. 0 = bisheriges Verhalten, komplettes Event wird archiviert (Standard, sicherste Einstellung).</div>
+      ${fld("Upload-Geschwindigkeit begrenzen (KB/s, 0 = unbegrenzt)","s_archive_bwlimit_kbps","number",c.archive_bwlimit_kbps||"0")}
+      <div class="note">Sicherheitsnetz gegen abgebrochene Übertragungen bei schwachem WLAN: der Hub setzt seit heute automatisch eine bessere Warteschlangen-Disziplin (fq_codel) auf dem WLAN-Interface, damit große Übertragungen den Erreichbarkeits-Check zum NAS nicht mehr aushungern und die Übertragung fälschlich abgebrochen wird. Falls das allein nicht reicht (weiterhin "Übertragung unterbrochen" auf der Aufnahmen-Seite), hier eine Obergrenze setzen, z. B. 2000-4000 KB/s — bremst bewusst, damit immer Luft für den Check bleibt. 0 = keine Begrenzung (Standard).</div>
     </div>
     <div class="card"><h3>Netzwerk</h3>
       ${fld("WLAN-SSID","s_ssid","text",c.ssid)}
@@ -1056,16 +1505,12 @@ async function viewSettings(m){
         <button class="btn sm ghost" id="apusb_off" style="display:none">Zurück auf Onboard-Chip</button>
       </div>
     </div>
-    <div class="card"><h3>Handy-Hotspot (WLAN)</h3>
-      <div class="note">Speichert einen Handy-Hotspot zusätzlich zum Heim-WLAN als bekanntes Netzwerk -- praktisch unterwegs (z. B. Werkstattbesuch), wenn kein Heim-WLAN in Reichweite ist. Heim-WLAN wird bevorzugt und übernimmt automatisch wieder, sobald es erreichbar ist.</div>
-      ${fld("Hotspot-SSID","s_hotspot_ssid","text",c.hotspot_ssid)}
-      ${fld("Hotspot-Passwort","s_hotspot_pass","password","",c.hotspot_pass_set?"•••• unverändert":"")}
-      <div class="note">SSID/Passwort hier eintragen und mit dem großen "Speichern" unten sichern, bevor unten eingeschaltet wird.</div>
-      <div class="saverow"><span class="note" id="hotspot_status">lädt…</span></div>
-      <div class="saverow">
-        <button class="btn sm" id="hotspot_on">Einschalten</button>
-        <button class="btn sm ghost" id="hotspot_off" style="display:none">Ausschalten</button>
-      </div>
+    <div class="card"><h3>WLAN-Netze (Handy-Hotspots usw.)</h3>
+      <div class="note">Das Heim-WLAN (oben unter „Netzwerk“) hat immer Vorrang. Ist es nicht in Reichweite, verbindet sich der Pi mit dem ersten erreichbaren Netz dieser Liste – z. B. Handy-Hotspots unterwegs. Reihenfolge mit ⬆️/⬇️ ändern; Änderungen gelten sofort, ohne „Speichern“ unten.</div>
+      <div class="filelist" id="wifi_list">lädt…</div>
+      ${fld("SSID","wifi_new_ssid","text","","z. B. Mein iPhone")}
+      ${fld("Passwort (leer = offenes Netz; bei einem schon eingetragenen Netz leer = unverändert)","wifi_new_pass","password","")}
+      <div class="saverow"><button class="btn sm" id="wifi_add">Hinzufügen / Passwort ändern</button><span class="note" id="wifi_msg"></span></div>
     </div>
     <div class="card"><h3>WireGuard-VPN (nach Hause)</h3>
       <div class="note">Baut unterwegs (z. B. über den Handy-Hotspot oben) eine verschlüsselte VPN-Verbindung zu einem WireGuard-Server zu Hause auf -- für Fernzugriff auf den Hub, ohne einen Port im Heimnetz nach außen öffnen zu müssen. Den öffentlichen Schlüssel unten in die Peer-Konfiguration des Heim-Servers eintragen, dann hier Peer-Daten eintragen, speichern und einschalten.</div>
@@ -1292,12 +1737,13 @@ async function viewSettings(m){
   $("#savebtn").onclick=async()=>{
     const fields=["archive_server","share_name","share_user","ssid","ap_ssid","tesla_ble_vin",
       "telegram_chat_id","retention_days","retention_free_gb","vault_autolock_min","time_zone","teslausb_hostname","sync_media_path",
-      "mqtt_host","mqtt_port","mqtt_user","hotspot_ssid",
+      "mqtt_host","mqtt_port","mqtt_user","archive_savedclips_last_minutes","archive_bwlimit_kbps",
       "wg_peer_pubkey","wg_endpoint","wg_allowed_ips","wg_address","wg_keepalive","wg_dns"];
     const secrets=["share_password","wifipass","ap_pass","teslafi_api_token","tessie_api_token",
-      "pushover_user_key","pushover_app_key","telegram_bot_token","mqtt_password","hotspot_pass","wg_psk","wg_privkey"];
+      "pushover_user_key","pushover_app_key","telegram_bot_token","mqtt_password","wg_psk","wg_privkey"];
     const bools=["archive_recentclips","archive_savedclips","archive_sentryclips","sync_all_content",
-      "ssh_disable_password","pushover_enabled","telegram_enabled","mqtt_enabled","nas_raw_keys","samba_enabled"];
+      "ssh_disable_password","pushover_enabled","telegram_enabled","mqtt_enabled","nas_raw_keys","samba_enabled",
+      "nas_skip_deleted"];
     const body={};
     fields.forEach(f=>body[f]=($("#s_"+f)||{}).value||"");
     secrets.forEach(f=>{const v=($("#s_"+f)||{}).value;if(v)body[f]=v;});
@@ -1385,41 +1831,44 @@ async function viewSettings(m){
     refreshApUsb();
   };
   refreshApUsb();
-  async function refreshHotspot(){
-    const statusEl=$("#hotspot_status");
-    if(!statusEl)return;
-    let r;try{r=await jget("api/hotspot/status");}catch(e){setTimeout(refreshHotspot,15000);return;}
-    const onBtn=$("#hotspot_on"),offBtn=$("#hotspot_off");
-    if(r.enabled){
-      onBtn.style.display="none";offBtn.style.display="";
-      statusEl.textContent=r.connected_now?"✓ verbunden":"bereit (nicht verbunden)";
-    }else{
-      onBtn.style.display="";offBtn.style.display="none";
-      statusEl.textContent="aus";
-    }
-    if(document.body.contains(statusEl))setTimeout(refreshHotspot,15000);
+  function renderWifi(r){
+    const box=$("#wifi_list");if(!box)return;
+    box.innerHTML="";
+    const badge=n=>n.connected?"✓ verbunden":(n.in_range?"in Reichweite":"");
+    const row=(ic,name,info,acts)=>{
+      const it=el("div","fitem");it.append(el("div","ic",ic));
+      const nm=el("div","nm");nm.textContent=name;it.append(nm);
+      const sz=el("div","sz");sz.textContent=info;it.append(sz);
+      const a=el("div","act");a.style.opacity=1;acts.forEach(b=>a.append(b));it.append(a);
+      box.append(it);
+    };
+    if(r.home&&r.home.ssid)row("🏠",r.home.ssid+" (Zuhause)",badge(r.home),[]);
+    const nets=r.networks||[];
+    nets.forEach((n,i)=>{
+      const up=el("button","iconbtn","⬆️");up.title="Priorität erhöhen";up.disabled=i===0;
+      up.onclick=()=>wifiOp("move",{ssid:n.ssid,delta:-1});
+      const dn=el("button","iconbtn","⬇️");dn.title="Priorität senken";dn.disabled=i===nets.length-1;
+      dn.onclick=()=>wifiOp("move",{ssid:n.ssid,delta:1});
+      const del=el("button","iconbtn","🗑️");del.title="Entfernen";
+      del.onclick=()=>{if(confirm("WLAN „"+n.ssid+"“ entfernen?"+(n.connected?"\n\nDer Pi ist gerade darüber verbunden und verliert die Verbindung.":"")))wifiOp("remove",{ssid:n.ssid});};
+      row("📶",(i+1)+". "+n.ssid+(n.has_password?"":" (offen)"),badge(n),[up,dn,del]);
+    });
+    if(!nets.length)box.append(el("div","note","Noch keine weiteren WLANs eingetragen."));
   }
-  $("#hotspot_on").onclick=async()=>{
-    $("#hotspot_on").disabled=true;
-    $("#hotspot_status").textContent="schalte ein…";
+  async function wifiOp(op,body){
+    const m=$("#wifi_msg");m.textContent="speichere…";
     try{
-      const r=await jpost("api/settings",{hotspot_enabled:true});
-      if(!r.ok)$("#hotspot_status").textContent="✗ "+(r.error||"Fehler");
-    }catch(e){$("#hotspot_status").textContent="✗ Verbindungsfehler";}
-    $("#hotspot_on").disabled=false;
-    refreshHotspot();
+      const r=await jpost("api/wifi/"+op,body);
+      if(r.ok){m.textContent="✓ gespeichert";renderWifi(r);}else m.textContent="✗ "+(r.error||"Fehler");
+      return !!r.ok;
+    }catch(e){m.textContent="✗ Verbindungsfehler";return false;}
+  }
+  $("#wifi_add").onclick=async()=>{
+    const s=$("#wifi_new_ssid").value.trim();
+    if(!s){$("#wifi_msg").textContent="✗ SSID fehlt";return;}
+    if(await wifiOp("add",{ssid:s,password:$("#wifi_new_pass").value})){$("#wifi_new_ssid").value="";$("#wifi_new_pass").value="";}
   };
-  $("#hotspot_off").onclick=async()=>{
-    $("#hotspot_off").disabled=true;
-    $("#hotspot_status").textContent="schalte aus…";
-    try{
-      const r=await jpost("api/settings",{hotspot_enabled:false});
-      if(!r.ok)$("#hotspot_status").textContent="✗ "+(r.error||"Fehler");
-    }catch(e){$("#hotspot_status").textContent="✗ Verbindungsfehler";}
-    $("#hotspot_off").disabled=false;
-    refreshHotspot();
-  };
-  refreshHotspot();
+  jget("api/wifi/networks").then(renderWifi).catch(()=>{});
   $("#wg_qr_import").onclick=async()=>{
     const file=($("#wg_qr_file").files||[])[0];
     if(!file){$("#wg_qr_msg").textContent="✗ bitte zuerst ein Bild auswählen";return;}

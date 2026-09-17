@@ -6,6 +6,10 @@ NAS sync for the Hub -- two deliberately different procedures:
      moves clips off the stick permanently (frees space) and never pulls
      anything back down. refresh_status()/push_key_sidecars() below only
      *observe* that process (coverage %, key sidecars); they don't drive it.
+     The one exception: a clip deleted on the NAS after it was archived
+     stays deleted (archiveloop never copies a file on its archived list
+     again) unless NAS_SKIP_DELETED is switched off -- then
+     refresh_status() takes it off that list so the next pass re-copies it.
   2. Music/LightShow/Boombox: TWO-WAY, via sync_media(). Pulls NAS-side
      changes down to the stick, then pushes stick-side changes up, so e.g.
      a song added directly on the NAS appears on the stick too, and vice
@@ -51,10 +55,11 @@ Camera-clip-observing jobs, both driven by nas_sync_loop() in server.py:
     called every 60s from key_fetch_loop() in server.py, not
     nas_sync_loop(), since it needs no NAS configured at all.
 """
-import os, re, json, time, base64, secrets, datetime, subprocess, tempfile, threading
+import os, re, json, time, base64, secrets, datetime, subprocess, tempfile, threading, fcntl
 import hubconf
 import blackbox
 import diag
+import files
 
 PAIRING_FILE = "HUB-NAS-KOPPLUNG.json"
 
@@ -69,7 +74,8 @@ README_TEXT = (
 
 _guard = threading.Lock()
 _op_lock = threading.Lock()   # serializes mount operations (loop vs. manual refresh)
-_cache = {"t": 0.0, "total": 0, "on_nas": 0, "percent": 0, "ok": None, "error": None, "clips": {}}
+_cache = {"t": 0.0, "total": 0, "on_nas": 0, "deleted": 0, "requeued": 0, "percent": 0,
+          "ok": None, "error": None, "clips": {}}
 _media_cache = {"t": 0.0, "ok": None, "error": None, "copied": 0}
 _trips_cache = {"t": 0.0, "ok": None, "error": None, "uploaded": 0}
 
@@ -93,6 +99,14 @@ def _mount(mnt, rw, share=None):
     if not server or not share:
         raise RuntimeError("NAS nicht konfiguriert")
     os.makedirs(mnt, exist_ok=True)
+    # A Hub process killed mid-operation (the OOM killer) leaves its share
+    # mounted here, and mount.cifs then refuses the mountpoint on every
+    # later try -- on 2026-09-15 that made the coverage check report "nicht
+    # erreichbar" for good while the NAS was fine. These mountpoints are
+    # private to this module and taken under _op_lock, so a lazy unmount of
+    # a leftover is safe.
+    if os.path.ismount(mnt):
+        subprocess.run(["umount", "-l", mnt], capture_output=True)
     creds = tempfile.NamedTemporaryFile("w", delete=False)
     creds.write("username=%s\npassword=%s\n" % (user, password)); creds.close()
     os.chmod(creds.name, 0o600)
@@ -104,7 +118,11 @@ def _mount(mnt, rw, share=None):
         try: os.remove(creds.name)
         except OSError: pass
     if r.returncode != 0:
-        raise RuntimeError((r.stderr or "Mount fehlgeschlagen").splitlines()[-1][:200])
+        # mount.cifs ends with a generic "Refer to the mount.cifs(8) manual
+        # page ..." line; the useful one is "mount error(N): ...".
+        lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount fehlgeschlagen")
+        raise RuntimeError(msg[:200])
 
 
 def _walk_basenames(root):
@@ -158,56 +176,147 @@ def _on_nas(rel, ts, remote):
     return False
 
 
-def refresh_status(scan_dir):
-    """Recompute local-vs-NAS clip coverage, per clip. scan_dir = .../TeslaCam"""
-    src = os.path.join(scan_dir, "EncryptedClips")
-    local = []
-    for root, _, names in os.walk(src):
+STATUS_MNT = "/tmp/hub_nas_status"
+
+
+def _farm_groups():
+    """{Viewer clip id: [camera file names]} for every clip in the link farm
+    (LOCAL_TESLACAM, the Viewer's BROWSE_ROOT). Ids are built exactly like
+    Viewer._scan() builds them ("<folder>|<timestamp>", e.g.
+    "RecentClips/2026-09-15|2026-09-15_08-51-30"), so the UI's per-clip
+    NAS badges find them."""
+    groups = {}
+    for root, _, names in os.walk(LOCAL_TESLACAM):
+        folder = os.path.relpath(root, LOCAL_TESLACAM).replace("\\", "/")
+        folder = "" if folder == "." else folder
         for nm in names:
-            if nm.endswith(".mp4"):
-                local.append(os.path.relpath(os.path.join(root, nm), src).replace("\\", "/"))
-    local_groups = _clip_groups(local)
+            m = TS_RE.search(nm)
+            if m:
+                groups.setdefault(folder + "|" + m.group(1), []).append(nm)
+    return groups
+
+
+ARCHIVED_LIST = "/mutable/sentry_files_archived"   # archiveloop's "already archived" list
+
+
+def skip_deleted():
+    """NAS_SKIP_DELETED, on unless set to false: a clip deleted on the NAS
+    after it was archived (e.g. to save space) stays deleted."""
+    return (hubconf.getval("NAS_SKIP_DELETED") or "true") != "false"
+
+
+def _farm_rel(folder, name):
+    return folder + "/" + name if folder else name
+
+
+def _read_archived():
+    """archiveloop's list of files it already copied to the NAS, as paths
+    relative to the link farm ("RecentClips/2026-09-14/...-front.mp4"). It
+    never copies a listed file again; entries leave the list once the file
+    is gone from the local snapshots."""
+    try:
+        with open(ARCHIVED_LIST, encoding="utf-8", errors="replace") as f:
+            return {l.rstrip("\n") for l in f if l.strip()}
+    except OSError:
+        return set()
+
+
+def _requeue(paths):
+    """Take paths off archiveloop's archived list so its next pass copies
+    them to the NAS again. Only under the archive lock: a pass copies the
+    list to /tmp when it starts and writes it back when it ends, which would
+    undo an edit made in between. A busy lock returns 0; the next check
+    retries."""
+    try:
+        fd = os.open(files.ARCHIVE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return 0
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        with open(ARCHIVED_LIST, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        keep = [l for l in lines if l.rstrip("\n") not in paths]
+        if len(keep) < len(lines):
+            tmp = ARCHIVED_LIST + ".new"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+            os.replace(tmp, ARCHIVED_LIST)
+        return len(lines) - len(keep)
+    except OSError:
+        return 0
+    finally:
+        os.close(fd)   # releases the flock
+
+
+def refresh_status(scan_dir=None):
+    """Local-vs-NAS coverage per clip, for the whole local history the Hub
+    shows: the link farm, not just the latest snapshot. Until 2026-09-15 this
+    only looked at the latest snapshot (the last hour or so) and keyed clips
+    as "EncryptedClips/...", which no badge in the UI could match.
+
+    Matched by file name against the NAS's EncryptedClips tree plus the
+    decrypted/broken trees. Each camera file name is unique (timestamp +
+    camera) while the folders differ: teslausb's archiver nests RecentClips
+    per day on the NAS, and Te_FITI (if present) moves originals into the
+    decrypted/broken trees -- such a clip is still on the NAS. scan_dir is
+    ignored; kept for the callers' signature.
+
+    A clip whose missing files are all on archiveloop's archived list was on
+    the NAS once and got deleted there. With NAS_SKIP_DELETED on (default)
+    it counts as done ("deleted") and stays gone; switched off, its files
+    are taken off the list, so the next archive pass copies them back."""
+    local_groups = _farm_groups()
     total = len(local_groups)
-    on_nas = 0
+    on_nas = deleted = requeued = 0
     clip_status = {}
     err = None
-    mnt = "/tmp/hub_nas_status"
+    mnt = STATUS_MNT
     if total:
+        skip = skip_deleted()
+        gone = set()
         with _op_lock:
             try:
                 # Mount the share root (not SHARE_NAME's full .../EncryptedClips
-                # path) so the DECRYPTED/BROKEN fallback trees, which are
-                # siblings of it, are reachable too.
+                # path) so the decrypted/broken trees, which are siblings of
+                # it, are reachable too.
                 full = (hubconf.getval("SHARE_NAME") or "").strip("/")
                 share_root, _, clips_subpath = full.partition("/")
                 _mount(mnt, rw=False, share=share_root)
                 try:
-                    enc_dir = os.path.join(mnt, clips_subpath) if clips_subpath else mnt
-                    remote = set()
-                    for root, _, names in os.walk(enc_dir):
-                        for nm in names:
-                            if nm.endswith(".mp4"):
-                                remote.add(os.path.relpath(os.path.join(root, nm), enc_dir).replace("\\", "/"))
-                    # Te_FITI (if present) deletes each original right after a
-                    # successful decrypt and moves undecryptable ones aside --
-                    # see module docstring. A clip missing from EncryptedClips
-                    # is still "on the NAS" if it shows up in either tree.
-                    fallback = _walk_basenames(os.path.join(mnt, "decrypted"))
-                    fallback |= _walk_basenames(os.path.join(mnt, "broken", os.path.basename(clips_subpath) or "EncryptedClips"))
-                    for ck, cams in local_groups.items():
-                        ts = ck.rsplit("|", 1)[-1]
-                        synced = all(_on_nas(rel, ts, remote) or os.path.basename(rel) in fallback
-                                     for rel in cams.values())
-                        clip_status[ck] = synced
-                        if synced:
-                            on_nas += 1
+                    remote = _walk_basenames(os.path.join(mnt, clips_subpath) if clips_subpath else mnt)
+                    remote |= _walk_basenames(os.path.join(mnt, "decrypted"))
+                    remote |= _walk_basenames(os.path.join(mnt, "broken"))
                 finally:
                     _umount(mnt)
+                # No clip at all on the NAS is far likelier a wrong path than
+                # everything deleted there: then nothing counts as deleted and
+                # nothing gets re-queued.
+                archived = _read_archived() if remote else set()
+                for ck, names in local_groups.items():
+                    folder = ck.split("|", 1)[0]
+                    missing = [n for n in names if n not in remote]
+                    if not missing:
+                        clip_status[ck] = True
+                        on_nas += 1
+                    elif archived and all(_farm_rel(folder, n) in archived for n in missing):
+                        if skip:
+                            clip_status[ck] = "deleted"
+                            deleted += 1
+                        else:
+                            clip_status[ck] = False
+                            gone.update(_farm_rel(folder, n) for n in missing)
+                    else:
+                        clip_status[ck] = False
+                if gone:
+                    requeued = _requeue(gone)
             except Exception as e:
                 err = str(e)
     with _guard:
-        _cache.update(t=time.time(), total=total, on_nas=on_nas,
-                       percent=(round(on_nas * 100 / total) if total else 100),
+        _cache.update(t=time.time(), total=total, on_nas=on_nas, deleted=deleted, requeued=requeued,
+                       percent=(round((on_nas + deleted) * 100 / total) if total else 100),
                        ok=(err is None), error=err, clips=clip_status)
     return dict(_cache)
 
@@ -290,6 +399,14 @@ def _media_mount(mnt, rw):
         raise RuntimeError("Sync-Pfad nicht konfiguriert (unter Einstellungen eintragen und speichern)")
     share, _, subpath = raw.partition("/")
     os.makedirs(mnt, exist_ok=True)
+    # A Hub process killed mid-operation (the OOM killer) leaves its share
+    # mounted here, and mount.cifs then refuses the mountpoint on every
+    # later try -- on 2026-09-15 that made the coverage check report "nicht
+    # erreichbar" for good while the NAS was fine. These mountpoints are
+    # private to this module and taken under _op_lock, so a lazy unmount of
+    # a leftover is safe.
+    if os.path.ismount(mnt):
+        subprocess.run(["umount", "-l", mnt], capture_output=True)
     creds = tempfile.NamedTemporaryFile("w", delete=False)
     creds.write("username=%s\npassword=%s\n" % (user, password)); creds.close()
     os.chmod(creds.name, 0o600)
@@ -301,7 +418,11 @@ def _media_mount(mnt, rw):
         try: os.remove(creds.name)
         except OSError: pass
     if r.returncode != 0:
-        raise RuntimeError((r.stderr or "Mount fehlgeschlagen").splitlines()[-1][:200])
+        # mount.cifs ends with a generic "Refer to the mount.cifs(8) manual
+        # page ..." line; the useful one is "mount error(N): ...".
+        lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount fehlgeschlagen")
+        raise RuntimeError(msg[:200])
     return subpath
 
 
@@ -367,11 +488,13 @@ def sync_trips(active_trip_id=None):
     trip still being recorded, if any -- its GPX would be incomplete) and
     any trip whose GPX already exists on the NAS: finished trips never
     change, so an existing remote file is always up to date and re-uploading
-    it would be wasted work."""
-    trips = [t["trip_id"] for t in blackbox.list_trips() if t["trip_id"] != active_trip_id]
+    it would be wasted work. Trips are encrypted on the Pi (see blackbox.py):
+    with the vault locked the missing ones wait for the next login, which is
+    not an error (locked=True)."""
+    trips = [t for t in blackbox.trip_ids() if t != active_trip_id]
     if not trips:
         with _guard:
-            _trips_cache.update(t=time.time(), ok=True, error=None, uploaded=0)
+            _trips_cache.update(t=time.time(), ok=True, error=None, uploaded=0, locked=False)
         return {"ok": True, "uploaded": 0}
     mnt = "/tmp/hub_nas_trips"
     full = (hubconf.getval("SHARE_NAME") or "").strip("/")
@@ -384,7 +507,7 @@ def sync_trips(active_trip_id=None):
             _trips_cache.update(t=time.time(), ok=False, error=str(e))
         _op_lock.release()
         return {"ok": False, "error": str(e)}
-    uploaded, errors = 0, []
+    uploaded, errors, locked = 0, [], False
     try:
         dest_dir = os.path.join(mnt, TRIPS_FOLDER)
         os.makedirs(dest_dir, exist_ok=True)
@@ -399,26 +522,53 @@ def sync_trips(active_trip_id=None):
                     f.write(gpx)
                 os.replace(tmp, dest)
                 uploaded += 1
+            except blackbox.Locked:
+                locked = True
+                break
             except Exception as e:
                 errors.append(f"{trip_id}: {e}")
     finally:
         _umount(mnt)
         _op_lock.release()
     with _guard:
-        _trips_cache.update(t=time.time(), ok=not errors, error="; ".join(errors) or None, uploaded=uploaded)
-    return {"ok": not errors, "uploaded": uploaded, "errors": errors}
+        _trips_cache.update(t=time.time(), ok=not errors, error="; ".join(errors) or None,
+                            uploaded=uploaded, locked=locked)
+    return {"ok": not errors, "uploaded": uploaded, "errors": errors, "locked": locked}
+
+
+KEYS_MNT = "/tmp/hub_nas_keys"
+RAWKEYS_MNT = "/tmp/hub_nas_rawkeys"
+
+
+def _archived_with_key(mnt, keys, suffix):
+    """[(NAS-relative path, FEK b64)] for every archived video on the NAS
+    whose key the vault knows and that has no <suffix> file yet. Matched by
+    file name: the vault's key ids come relative to the latest snapshot
+    (flat RecentClips/<file>) or to the link farm (RecentClips/<date>/<file>),
+    while teslausb's archiver files videos per day on the NAS -- matching by
+    id only ever covered clips of the latest snapshot (fixed 2026-09-15)."""
+    by_name = {}
+    for cid, fek_b64 in keys.items():
+        by_name.setdefault(os.path.basename(cid), fek_b64)
+    out = []
+    for root, dirs, names in os.walk(mnt):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]   # rsync's .teslausbtmp etc.
+        for nm in names:
+            if nm.endswith(".mp4") and nm in by_name and not os.path.isfile(os.path.join(root, nm) + suffix):
+                out.append((os.path.relpath(os.path.join(root, nm), mnt).replace("\\", "/"), by_name[nm]))
+    return out
 
 
 def push_key_sidecars(scan_dir, vault):
-    """Write a sealed per-video key sidecar on the NAS for every local clip
-    whose FEK is already in the vault and whose video is already archived."""
+    """Write a sealed per-video key sidecar on the NAS next to every archived
+    video whose FEK is in the vault -- whether or not the clip is still on
+    the stick. scan_dir is ignored; kept for the callers' signature."""
     if not vault.is_unlocked():
         return {"ok": False, "error": "vault locked"}
     keys = vault.keys()
     if not keys:
         return {"ok": True, "written": 0}
-    src = os.path.join(scan_dir, "EncryptedClips")
-    mnt = "/tmp/hub_nas_keys"
+    mnt = KEYS_MNT
     _op_lock.acquire()
     try:
         _mount(mnt, rw=True)
@@ -434,16 +584,9 @@ def push_key_sidecars(scan_dir, vault):
                     f.write(README_TEXT)
             except Exception:
                 pass
-        for cid, fek_b64 in keys.items():
-            rel = cid.lstrip("/")
-            if not os.path.isfile(os.path.join(src, rel)):
-                continue          # key for a clip no longer on the stick
+        for rel, fek_b64 in _archived_with_key(mnt, keys, ".key.json"):
             remote_mp4 = os.path.join(mnt, rel)
-            if not os.path.isfile(remote_mp4):
-                continue          # video not archived yet -- nothing to attach to
             sidecar = remote_mp4 + ".key.json"
-            if os.path.isfile(sidecar):
-                continue
             try:
                 sealed = vault.seal(base64.b64decode(fek_b64))
                 payload = json.dumps({
@@ -609,8 +752,7 @@ def push_raw_keys(scan_dir, vault, state_dir):
     keys = vault.keys()
     if not keys:
         return {"ok": True, "written": 0}
-    src = os.path.join(scan_dir, "EncryptedClips")
-    mnt = "/tmp/hub_nas_rawkeys"
+    mnt = RAWKEYS_MNT
     _op_lock.acquire()
     try:
         _mount(mnt, rw=True)
@@ -624,16 +766,9 @@ def push_raw_keys(scan_dir, vault, state_dir):
                     "error": "NAS-Kopplung ungültig -- Prüfdatei fehlt oder stimmt nicht überein. "
                              "Keine Rohschlüssel übertragen (falsches/vertauschtes NAS?). "
                              "Falls das NAS bewusst gewechselt wurde: Kopplung zurücksetzen und erneut versuchen."}
-        for cid, fek_b64 in keys.items():
-            rel = cid.lstrip("/")
-            if not os.path.isfile(os.path.join(src, rel)):
-                continue
+        for rel, fek_b64 in _archived_with_key(mnt, keys, ".rawkey.json"):
             remote_mp4 = os.path.join(mnt, rel)
-            if not os.path.isfile(remote_mp4):
-                continue
             sidecar = remote_mp4 + ".rawkey.json"
-            if os.path.isfile(sidecar):
-                continue
             try:
                 payload = json.dumps({
                     "video": os.path.basename(rel),

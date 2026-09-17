@@ -327,7 +327,8 @@ function create_usb_drive_backing_files () {
   /tmp/create-backingfiles.sh "$CAM_SIZE" "$MUSIC_SIZE" "$LIGHTSHOW_SIZE" "$BOOMBOX_SIZE" "$BACKINGFILES_MOUNTPOINT" "$USE_EXFAT"
 
   update_backingfiles_fstab_entry $BACKINGFILES_MOUNTPOINT/cam_disk.bin /mnt/cam
-  update_backingfiles_fstab_entry $BACKINGFILES_MOUNTPOINT/music_disk.bin /mnt/music
+  # media_disk.bin keeps the /mnt/music mount point archiveloop uses (MUSIC_MOUNT)
+  update_backingfiles_fstab_entry $BACKINGFILES_MOUNTPOINT/media_disk.bin /mnt/music
   update_backingfiles_fstab_entry $BACKINGFILES_MOUNTPOINT/lightshow_disk.bin /mnt/lightshow
   update_backingfiles_fstab_entry $BACKINGFILES_MOUNTPOINT/boombox_disk.bin /mnt/boombox
 
@@ -360,8 +361,9 @@ function create_usb_drive_backing_files () {
       umount -l /mnt/cam || setup_progress "failed to unmount /mnt/cam"
     fi
 
-    if [ -e /backingfiles/music_disk.bin ] && mount_with_retry /mnt/music
+    if [ -e /backingfiles/media_disk.bin ] && mount_with_retry /mnt/music
     then
+      mkdir -p /mnt/music/Music
       touch /mnt/music/.metadata_never_index
       umount -l /mnt/music || setup_progress "failed to unmount /mnt/music"
     fi
@@ -758,10 +760,10 @@ function diagnose {
     else
       echo "no cam disk image found"
     fi
-    if [ -f /backingfiles/music_disk.bin ]
+    if [ -f /backingfiles/media_disk.bin ]
     then
-      echo "music disk image has $(filefrag /backingfiles/music_disk.bin | awk '{print $2}') extents"
-      parted -s /backingfiles/music_disk.bin print || true
+      echo "music disk image has $(filefrag /backingfiles/media_disk.bin | awk '{print $2}') extents"
+      parted -s /backingfiles/media_disk.bin print || true
     else
       echo "no music disk image found"
     fi
@@ -1069,6 +1071,15 @@ setup_progress "Running post-setup tasks"
     fi
   done
 )
+
+# This fork's web UI. The installation image puts the source tree in
+# /root/te_camhub (SOURCE_DIR); HUB_INSTALL=false leaves the Hub out.
+if [ "${HUB_INSTALL:-true}" = "true" ] && [ -f "${SOURCE_DIR:-}/hub/install.sh" ]
+then
+  setup_progress "Installing TeslaCam Hub"
+  bash -eu "$SOURCE_DIR/hub/install.sh"
+  systemctl disable teslacam-setup-portal.service &> /dev/null || true
+fi
 
 headless_setup_mark_setup_success
 

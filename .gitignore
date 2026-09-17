@@ -6,3 +6,9 @@
 .idea/
 __pycache__/
 *.pyc
+
+# installation image: the config template on the boot partition is not a secret
+!image/teslausb_setup_variables.conf
+# tools/build-image.sh output and base-image download
+dist/
+.image-cache/

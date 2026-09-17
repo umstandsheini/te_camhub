@@ -6,8 +6,12 @@ then
   return 1 # shouldn't use exit when sourced
 fi
 
-# Unload the module that was loaded by cmdline.txt
-modprobe -r g_ether
+# Unload the module that was loaded by cmdline.txt -- unless the early
+# teslausb-gadget.service already did, while binding the drives.
+if grep -q '^g_ether ' /proc/modules
+then
+  modprobe -r g_ether
+fi
 
 export LOG_FILE=/mutable/archiveloop.log
 
@@ -82,7 +86,7 @@ elif [ "${ARCHIVE_SYSTEM:-none}" = "cifs" ] || [ "${ARCHIVE_SYSTEM:-none}" = "nf
 then
   # For CIFS and NFS
   [[ -n "${SHARE_NAME:-}" && -f /backingfiles/cam_disk.bin ]] && export ARCHIVE_MOUNT=/mnt/archive
-  [[ -n "${MUSIC_SHARE_NAME:-}" && -f /backingfiles/music_disk.bin ]] && export MUSIC_ARCHIVE_MOUNT=/mnt/musicarchive
+  [[ -n "${MUSIC_SHARE_NAME:-}" && -f /backingfiles/media_disk.bin ]] && export MUSIC_ARCHIVE_MOUNT=/mnt/musicarchive
 fi
 
 function timestamp () {
@@ -284,12 +288,14 @@ function fix_errors_in_images () {
   # their own dedicated images -- see enable_gadget.sh's comment (Tesla
   # only recognizes one of LightShow/Boombox when they share a partition).
   #
-  # Run independently: each fsck gets its own loop device (losetup -f is
-  # kernel-atomic, safe under concurrent callers) and touches nothing the
-  # others touch. cam_disk.bin dominates the wall-clock cost by far (tens
-  # of GB vs. under 1GB each for the rest), so running the small ones
-  # alongside it instead of after it removes their time from the boot
-  # path entirely instead of just adding it up serially.
+  # Backgrounded per image (losetup -f is kernel-atomic, safe under
+  # concurrent callers), but they all read/write the same physical USB
+  # storage underneath, so this buys process-level overlap, not real disk
+  # throughput -- expect their wall-clock cost to roughly add up rather
+  # than fully hide behind cam_disk.bin's, unlike what "run independently"
+  # might suggest. Not worth serializing them on purpose either: a clean
+  # FAT32 checks fast regardless, so the parallel launch still wins
+  # whenever none of them need real repair work.
   local pids=()
   for i in cam media lightshow boombox
   do
@@ -300,7 +306,10 @@ function fix_errors_in_images () {
       pids+=($!)
     fi
   done
-  wait "${pids[@]}"
+  if [ "${#pids[@]}" -gt 0 ]
+  then
+    wait "${pids[@]}"
+  fi
 }
 
 function disconnect_usb_drives_from_host () {
@@ -471,7 +480,16 @@ function archive_teslacam_clips () {
   rm -rf "$overlayupper" "$overlaywork" "$overlaymerged"
   mkdir -p "$overlayupper" "$overlaywork" "$overlaymerged"
 
-  mount -t overlay overlay -o "lowerdir=$overlaylower,upperdir=$overlayupper,workdir=$overlaywork" "$overlaymerged"
+  # xino=off: this Pi runs a 64-bit kernel with a 32-bit (armhf) userland.
+  # OverlayFS's default xino behavior folds a per-layer index into high
+  # inode-number bits, producing 64-bit inode numbers the 32-bit rsync
+  # binary's stat struct can't hold -- rsync then fails every file with
+  # "link_stat ... failed: Value too large for defined data type (75)"
+  # (EOVERFLOW) and the whole archive pass for that cycle is skipped.
+  # Nothing here depends on inode numbers being distinct across layers
+  # (upper/work are wiped and recreated every call, right above), so
+  # trading that off for working rsync is free.
+  mount -t overlay overlay -o "lowerdir=$overlaylower,upperdir=$overlayupper,workdir=$overlaywork,xino=off" "$overlaymerged"
 
   # Build list of the files to be archived.
   local -r sentrylist=/tmp/sentry_files
@@ -537,6 +555,30 @@ function archive_teslacam_clips () {
 
   # apply custom removals/additions
   filterfile "${sentrylist}"
+
+  # Optional: archive only the last N minutes of SavedClips footage for each
+  # SavedClips event folder. 0 keeps existing behavior (archive all). Ported
+  # from marcone/teslausb#1033. Files pruned this way are treated the same
+  # as archived (added to sentrylist_archived below) -- they are never
+  # retried, so this is a permanent trim of the older parts of long events,
+  # not a delay. Controlled from the Hub's Settings page
+  # (sync_savedclips_last_minutes), see hub/app/hubconf.py.
+  local -r savedclips_removed_by_window=/tmp/savedclips_removed_by_window
+  true > "${savedclips_removed_by_window}"
+  local -r archive_savedclips_last_minutes=${ARCHIVE_SAVEDCLIPS_LAST_MINUTES:-0}
+  if [[ "${archive_savedclips_last_minutes}" =~ ^[0-9]+$ ]] && [ "${archive_savedclips_last_minutes}" -gt 0 ]
+  then
+    if command -v python3 > /dev/null
+    then
+      python3 /root/bin/filter_savedclips_window.py --list "${sentrylist}" --minutes "${archive_savedclips_last_minutes}" --removed-list "${savedclips_removed_by_window}" || \
+        log "SavedClips minute-window filter failed, continuing without it"
+    else
+      log "python3 not available, skipping SavedClips minute-window filter"
+    fi
+  elif ! [[ "${archive_savedclips_last_minutes}" =~ ^[0-9]+$ ]]
+  then
+    log "Invalid ARCHIVE_SAVEDCLIPS_LAST_MINUTES=${archive_savedclips_last_minutes}, expected a non-negative integer"
+  fi
 
   local -r sentry_count=$(grep -c -v TeslaTrackMode "$sentrylist")
   local -r trackmode_count=$(grep -c TeslaTrackMode "$sentrylist")
@@ -630,6 +672,12 @@ function archive_teslacam_clips () {
       fi
     done < ${sentrylist}
 
+    if [ -s "${savedclips_removed_by_window}" ]
+    then
+      cat "${savedclips_removed_by_window}" >> "${sentrylist_archived}"
+      sortfile "${sentrylist_archived}"
+    fi
+
     # copy the list of archived files back to /mutable if it has changed
     if ! diff -q -N "${sentrylist_archived}" "${sentrylist_previously_archived}" > /dev/null
     then
@@ -692,12 +740,55 @@ function has_cam_disk () {
   [ -f /backingfiles/cam_disk.bin ]
 }
 
+# Phase marker for the Hub's sync hold (hub/app/synchold.py): "starting"
+# (archiveloop up, no reachability decision yet), "waiting" (NAS not
+# reachable yet), "running" and then "done" or "failed" (an archive pass),
+# each stamped with the uptime it was set at -- the clock the Hub compares
+# against, since the Pi has no RTC and wall-clock time jumps at NTP sync.
+# /tmp is per-boot tmpfs, so a marker from an earlier boot can never be
+# misread.
+function set_archive_state () {
+  echo "$1 $(awk '{print $1}' /proc/uptime)" > /tmp/teslausb_archive_state.tmp &&
+    mv -f /tmp/teslausb_archive_state.tmp /tmp/teslausb_archive_state || true
+}
+
+# Keep-awake during archiving. With the Hub's sync hold on (the default),
+# the Hub owns keeping the car awake for the whole home visit -- this
+# archive pass included. awake_start's own BLE nudge is charge-port-close,
+# which the vehicle has refused for this key's charging_manager role since
+# 2026-07-10 (see BLE_ACTIONS in hub/app/diag.py): every call failed and
+# only took BLE connection slots away from the Hub. Skipping it loses
+# nothing -- but the Hub's own 'wake' nudge was measured on 2026-09-13 not
+# to hold the car awake either (hub/app/keepawake.py), so neither path keeps
+# it up yet. Upstream's awake_start/awake_stop still run whenever the Hub
+# isn't up or the hold is switched off.
+function hub_keeps_car_awake () {
+  systemctl is-active --quiet teslacam-hub &&
+    ! grep -q "^export SYNC_HOLD_ENABLED='false'" /root/teslausb_setup_variables.conf 2> /dev/null
+}
+
+function start_keep_awake () {
+  if hub_keeps_car_awake
+  then
+    log "Keep-awake during archiving is handled by the Hub's sync hold."
+  else
+    /root/bin/awake_start || true
+  fi
+}
+
+function stop_keep_awake () {
+  hub_keeps_car_awake || /root/bin/awake_stop || true
+}
+
 function archive_clips () {
   log "Archiving..."
+  set_archive_state running
+  local result=done
 
   if ! /root/bin/connect-archive.sh
   then
     log "Couldn't connect archive, skipping archive step."
+    set_archive_state failed
     return
   fi
 
@@ -709,6 +800,7 @@ function archive_clips () {
     log "Finished archiving."
   else
     log "Archiving failed."
+    result=failed
   fi
 
   if timeout 5 [ -d "${MUSIC_ARCHIVE_MOUNT:-}" -a -d "$MUSIC_MOUNT" ]
@@ -726,6 +818,7 @@ function archive_clips () {
 
   touch /tmp/flag_post_archive  #Set post-archive flag for optional temperature logging
   /root/bin/disconnect-archive.sh
+  set_archive_state "$result"
 }
 
 # archive_clips touches shared temp state (/tmp/sentry_files etc.) and the
@@ -736,6 +829,30 @@ function archive_lock_and_run () {
     flock -x -w 60 201 || { log "archive lock busy, skipping this pass"; exit 0; }
     archive_clips
   ) 201>/tmp/teslausb_archive.lock
+}
+
+function archive_pass_failed () {
+  grep -q '^failed ' /tmp/teslausb_archive_state 2> /dev/null
+}
+
+# A failed pass (rsync killed on a flaky link, NAS hiccup, archive mount
+# failing) used to wait for the next home visit. While the Hub's sync hold
+# keeps the car awake, retry instead: every 2 minutes as long as the NAS
+# stays reachable, at most as long as the hold itself may last
+# (SYNC_HOLD_MAX_MIN, default 120) -- after that the Hub lets the car sleep,
+# which takes this Pi's power with it anyway. The car gets its drive back
+# between attempts.
+function archive_with_retries () {
+  archive_lock_and_run
+  local tries=$(( ${SYNC_HOLD_MAX_MIN:-120} / 2 ))
+  while [ "$tries" -gt 0 ] && archive_pass_failed && hub_keeps_car_awake && archive_is_reachable
+  do
+    connect_usb_drives_to_host
+    log "Archive pass failed, retrying in 2 minutes while the Hub keeps the car awake ($tries attempts left)."
+    sleep 120
+    archive_lock_and_run
+    tries=$((tries - 1))
+  done
 }
 
 function slowblink () {
@@ -835,6 +952,35 @@ function logrotator {
   done
 }
 
+function power_monitor {
+  # The Pi's own kernel latches undervoltage/throttling into vcgencmd
+  # get_throttled's sticky bits (persist until reboot), but nothing was
+  # ever polling and recording that -- a transient dip that self-clears
+  # left no trace anywhere. Log on every CHANGE (not every poll) so a real
+  # event stands out in archiveloop.log instead of being buried in
+  # identical repeats; bit meanings: 0x1 under-voltage now, 0x4 throttled
+  # now, 0x8 soft temp limit now, 0x10000/0x40000/0x80000 = same three but
+  # "has happened since boot".
+  echo -n power_monitor > /proc/self/comm
+  if ! command -v vcgencmd > /dev/null
+  then
+    log "Power Monitor: vcgencmd not available, skipping."
+    return
+  fi
+  local last=""
+  while true
+  do
+    local cur
+    cur=$(vcgencmd get_throttled 2>/dev/null || echo "throttled=ERR")
+    if [ "$cur" != "$last" ]
+    then
+      log "Power Monitor: $cur"
+      last="$cur"
+    fi
+    sleep 30
+  done
+}
+
 function wifichecker {
   echo -n wifichecker > /proc/self/comm
   dmesg -w | {
@@ -890,12 +1036,48 @@ export -f log
 
 echo "==============================================" >> "$LOG_FILE"
 log "Starting archiveloop at $(awk '{print $1}' /proc/uptime) seconds uptime..."
+set_archive_state starting
+
+# Distinguishing a crash/power-loss reboot from a clean one used to mean
+# manually paging through `journalctl -b -1` for whether it ends with a
+# normal shutdown sequence or just stops mid-activity -- do that check
+# here instead, once, so it's a one-line answer in this same log going
+# forward. Absence of evidence isn't proof (journalctl -g matches nothing
+# on a query error too), so this only ever claims "clean", never "crash"
+# as a definite verdict -- but the crash case is what actually needs
+# investigating, and this flags it either way.
+if command -v journalctl > /dev/null
+then
+  if [ -n "$(journalctl -b -1 --no-pager -g 'Reached target Shutdown|Reached target Reboot|Reached target Power-Off|System is powering down|Rebooting\.' 2>/dev/null)" ]
+  then
+    log "Startup: previous boot shut down cleanly."
+  else
+    log "Startup: previous boot's log just stops mid-activity -- looks like a crash or power loss, not a clean shutdown."
+  fi
+fi
 
 set_sys_param /proc/sys/vm/dirty_background_bytes DIRTY_BACKGROUND_BYTES 65536
 set_sys_param /proc/sys/vm/dirty_ratio DIRTY_RATIO 80
 set_sys_param /sys/devices/system/cpu/cpufreq/policy0/scaling_governor CPU_GOVERNOR conservative
 
+# Community-reported fix (marcone/teslausb#728): the default pfifo_fast
+# queueing discipline on wlan0 lets a large rsync transfer (archive-clips.sh)
+# saturate the link badly enough to starve out small, latency-sensitive
+# packets -- including archive-is-reachable.sh's own connectionmonitor
+# liveness check (see run/cifs_archive/archive-clips.sh), which then wrongly
+# concludes the NAS is unreachable and kills an otherwise-healthy transfer.
+# We hit exactly this today. fq_codel keeps small packets flowing even
+# under a saturating bulk transfer, without capping throughput the way
+# rsync --bwlimit does. "replace" (not "add") so restarting archiveloop
+# without a reboot doesn't fail on an already-set qdisc; set WIFI_QDISC=default
+# to skip (e.g. if wlan0 doesn't exist, or this ever causes trouble).
+if [ "${WIFI_QDISC:-fq_codel}" != "default" ] && [ -e /sys/class/net/wlan0 ]
+then
+  tc qdisc replace dev wlan0 root "${WIFI_QDISC:-fq_codel}" || true
+fi
+
 /root/bin/temperature_monitor &
+power_monitor &
 
 if has_cam_disk
 then
@@ -905,25 +1087,36 @@ fi
 logrotator &
 wifichecker &
 
-fix_errors_in_images
-# always remove files that fsck recoverd
-clean_cam_mount boot
-
-# Connect before the initial snapshot, not after: the car needs fsck (data
-# integrity) and clean_cam_mount (frees space on the actual backing file,
-# which must happen before the car can start writing to it) done first, but
-# it does not need a snapshot to exist yet -- that only benefits the later
-# archiving pass. make_snapshot.sh's reflink copy touches a new clone file,
-# never the live cam_disk.bin, so running it after the gadget is already
-# connected doesn't race with the car. Moving connect here shaves whatever
-# make_snapshot.sh's initial run costs off the time-to-first-recognized
-# after the car (re)powers the USB port -- see ENCRYPTED_CLIPS_ISSUE.md's
-# sibling investigation, "storage device recognized late after wake".
+# No fsck at all before this first connect. A clean shutdown makes fsck
+# near-instant regardless of image size, but an unclean one means real
+# repair work -- observed up to 15+ minutes on cam_disk.bin alone, and the
+# three small disks together still cost roughly two minutes even when nothing
+# is actually wrong with them (see fix_errors_in_images: they share the same
+# physical USB storage, so "parallel" doesn't mean concurrent-on-disk). All
+# of that used to sit in front of the car ever seeing any drive. The one
+# priority that matters here is time-to-recognized; fsck completeness and
+# FSCK*.REC/short-file cleanup catch up on the very next
+# disconnect_usb_drives_from_host cycle, same as they already do throughout
+# the day -- nothing is permanently skipped, just deferred past the
+# boot-time critical path.
+#
+# Connect before the initial snapshot, not after: the car doesn't need a
+# snapshot to exist yet -- that only benefits the later archiving pass.
+# make_snapshot.sh's reflink copy touches a new clone file, never the live
+# cam_disk.bin, so running it after the gadget is already connected doesn't
+# race with the car. Moving connect here shaves whatever make_snapshot.sh's
+# initial run costs off the time-to-first-recognized after the car
+# (re)powers the USB port -- see ENCRYPTED_CLIPS_ISSUE.md's sibling
+# investigation, "storage device recognized late after wake".
 connect_usb_drives_to_host
 
 if has_cam_disk
 then
-  # don't need another fsck because fix_errors_in_images already did that
+  # cam_disk.bin was deliberately NOT fsck'd above -- nofsck here only means
+  # "don't fsck it a second time", it doesn't imply it's already clean this
+  # boot. The snapshot is a read-only reflink for the Hub viewer/archiving,
+  # so reading a not-yet-repaired filesystem is safe; the repair itself
+  # happens on the next disconnect cycle regardless of this snapshot.
   /root/bin/make_snapshot.sh nofsck
 fi
 
@@ -933,11 +1126,11 @@ then
 
   set_time
 
-  /root/bin/awake_start || true
+  start_keep_awake
 
-  archive_lock_and_run
+  archive_with_retries
 
-  /root/bin/awake_stop || true
+  stop_keep_awake
 
   doubleblink
 
@@ -950,13 +1143,15 @@ while true
 do
   slowblink
 
+  set_archive_state waiting
+
   wait_for_archive_to_be_reachable
 
   fastblink
 
   set_time
 
-  /root/bin/awake_start || true
+  start_keep_awake
 
   sleep "${ARCHIVE_DELAY:-20}"
 
@@ -966,9 +1161,12 @@ do
     /root/bin/make_snapshot.sh
   fi
 
-  archive_clips
+  # Through the lock, like snapshotloop (see archive_lock_and_run): two
+  # overlapping passes would also interleave their running/done markers
+  # and could tell the Hub's sync hold "done" while one is still copying.
+  archive_with_retries
 
-  /root/bin/awake_stop || true
+  stop_keep_awake
 
   doubleblink
 
