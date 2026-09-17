@@ -73,3 +73,7 @@ jobs:
             echo "giving up on $f"
             exit 1
           done
+          # gh creates a release as a draft and publishes it only after its own
+          # upload; a cancelled run leaves that draft behind, and the Hub's
+          # update check asks for the latest *published* release.
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
