@@ -13,7 +13,11 @@
 # boot and setup-teslausb do that on the Pi.
 #
 #   sudo tools/build-image.sh [--src te_camhub-<tag>.tar.gz] [--out file.img.xz]
-#                             [--base raspios.img.xz] [--country DE]
+#                             [--base raspios.img.xz] [--country DE] [--xz-level N]
+#
+# --xz-level trades image size for build time (default 6). The release
+# workflow uses a lower one: compressing 1.6 GB at 6 took ~45 min on a GitHub
+# runner and ran the job into its time limit.
 #
 # Without --src the committed tree goes in (git archive HEAD), with VERSION
 # "dev-<commit>". The base image is downloaded once into .image-cache/ and
@@ -28,6 +32,7 @@ SRC_TGZ=""
 OUT=""
 BASE=""
 COUNTRY=DE
+XZ_LEVEL=6
 while [ $# -gt 0 ]
 do
   case "$1" in
@@ -35,6 +40,7 @@ do
     --out) OUT=$2; shift 2 ;;
     --base) BASE=$2; shift 2 ;;
     --country) COUNTRY=$2; shift 2 ;;
+    --xz-level) XZ_LEVEL=$2; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -128,8 +134,8 @@ echo "cmdline.txt: $(cat "$CMDLINE")"
 sync
 umount "$B" "$R"
 
-echo "== compressing to $OUT"
-xz -T0 -6 -c "$IMG" > "$OUT.part"
+echo "== compressing to $OUT (xz -$XZ_LEVEL)"
+xz -T0 "-$XZ_LEVEL" -c "$IMG" > "$OUT.part"
 mv "$OUT.part" "$OUT"
 ls -l "$OUT"
 sha256sum "$OUT"
