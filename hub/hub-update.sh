@@ -26,6 +26,8 @@ LOG=${HUB_UPDATE_LOG:-/mutable/hub-update.log}
 MARKER=${HUB_UPDATE_MARKER:-/run/teslacam-hub-update}
 LOCK=${HUB_UPDATE_LOCK:-/tmp/teslausb_archive.lock}
 HEALTH_WAIT=${HUB_UPDATE_HEALTH_WAIT:-240}
+# Single quotes on purpose: healthy() evals this on every try.
+# shellcheck disable=SC2016
 HEALTH_CMD=${HUB_UPDATE_HEALTH_CMD:-'[ "$(curl -sk -m 5 -o /dev/null -w "%{http_code}" https://127.0.0.1/api/vault/status)" = 200 ]'}
 MOUNT=${HUB_UPDATE_MOUNT:-mount}
 SYSTEMCTL=${HUB_UPDATE_SYSTEMCTL:-systemctl}

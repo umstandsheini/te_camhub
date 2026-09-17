@@ -748,8 +748,10 @@ function has_cam_disk () {
 # /tmp is per-boot tmpfs, so a marker from an earlier boot can never be
 # misread.
 function set_archive_state () {
-  echo "$1 $(awk '{print $1}' /proc/uptime)" > /tmp/teslausb_archive_state.tmp &&
+  if echo "$1 $(awk '{print $1}' /proc/uptime)" > /tmp/teslausb_archive_state.tmp
+  then
     mv -f /tmp/teslausb_archive_state.tmp /tmp/teslausb_archive_state || true
+  fi
 }
 
 # Keep-awake during archiving. With the Hub's sync hold on (the default),
@@ -783,7 +785,7 @@ function stop_keep_awake () {
 function archive_clips () {
   log "Archiving..."
   set_archive_state running
-  local result=done
+  local result="done"
 
   if ! /root/bin/connect-archive.sh
   then
