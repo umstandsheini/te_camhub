@@ -39,6 +39,7 @@ API = "https://api.github.com/repos/%s/releases/latest"
 ROOT = "/"
 VERSION_FILE = "/opt/teslacam-hub/VERSION"
 RUNNER = "/opt/teslacam-hub/hub-update.sh"
+RUNNER_COPY = "/run/teslacam-hub-update.sh"   # tmpfs: see _launch()
 BACKUP_DIR = "/backingfiles/hub-backups"
 WORK_DIR = "/backingfiles/hub-update"
 LOG = "/mutable/hub-update.log"
@@ -374,6 +375,17 @@ def fetch_release(rel):
 
 def _launch(src, backup, tag):
     runner = RUNNER if os.path.isfile(RUNNER) else os.path.join(src, "hub", "hub-update.sh")
+    # Run it from /run (tmpfs), not from the root filesystem: install.sh
+    # replaces hub-update.sh while it is executing, and bash keeps the
+    # now-deleted file open until it exits -- which kept / from going back to
+    # read-only after every update (seen on the v2026.09.18.1 install, where
+    # the script's own inode was the only thing still held).
+    try:
+        shutil.copyfile(runner, RUNNER_COPY)
+        os.chmod(RUNNER_COPY, 0o755)
+        runner = RUNNER_COPY
+    except OSError as e:
+        _log("Kopie nach %s nicht moeglich (%s) -- starte direkt von %s" % (RUNNER_COPY, e, runner))
     subprocess.run(["systemctl", "reset-failed", UNIT], capture_output=True)
     r = subprocess.run(["systemd-run", "--unit=" + UNIT, "--collect", "/bin/bash", runner, src, backup, tag],
                        capture_output=True, text=True, timeout=30)

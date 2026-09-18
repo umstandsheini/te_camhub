@@ -101,9 +101,23 @@ else
   fi
 fi
 
+finish_ro() {
+  # install.sh already tries this; a last attempt here catches whatever was
+  # still holding a replaced file open while it ran.
+  sync
+  for _ in 1 2 3
+  do
+    $MOUNT / -o remount,ro 2> /dev/null && return 0
+    sleep 5
+  done
+  echo "=== / bleibt beschreibbar bis zum naechsten Neustart"
+  return 0
+}
+
 if [ -z "$failed" ]
 then
   rm -rf "$SRC"
+  finish_ro
   report "fertig" true
   echo "##### Ergebnis: OK"
   exit 0
@@ -117,5 +131,6 @@ then
 else
   report "zurückgesetzt" false "$failed – vorherige Version wiederhergestellt, der Hub antwortet aber nicht: Pi neu starten"
 fi
+finish_ro
 echo "##### Ergebnis: $failed"
 exit 1
