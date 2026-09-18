@@ -1335,6 +1335,21 @@ class _Limited:
         return data
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """A browser that walks away mid-response -- cancelled thumbnail loads
+    while scrolling the clip grid are the usual case -- makes the TLS layer
+    raise, and socketserver prints a full traceback per occurrence. Six of
+    them showed up in a single browsing session on 2026-09-18, which buries
+    the entries that matter. These are not errors of ours: drop them, keep
+    every other one."""
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ssl.SSLEOFError, ssl.SSLZeroReturnError,
+                                          BrokenPipeError, ConnectionResetError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def _import_legacy():
     keys, tok = {}, {}
     state = CFG["state"]
@@ -1432,7 +1447,7 @@ def main():
     threading.Thread(target=sleep_guard_loop, daemon=True).start()
     if a.redirect80:
         threading.Thread(target=_redirect80, daemon=True).start()
-    httpd = ThreadingHTTPServer(("0.0.0.0", a.port), H)
+    httpd = _QuietServer(("0.0.0.0", a.port), H)
     scheme = "http"
     if CFG["tls"]:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
