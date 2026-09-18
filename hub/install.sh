@@ -218,14 +218,31 @@ fi
 
 echo "[hub-install] remounting / ro"
 sync
-for try in 1 2 3; do
+# Every restart above (the Hub itself included) leaves the replaced files
+# open in the process that is going away, and a deleted-but-open file keeps
+# the filesystem busy. On the 2026-09-18 update three tries over 9 s were not
+# enough and / stayed writable; six over 30 s cover it, and the last attempt
+# names whoever is still holding on.
+for try in 1 2 3 4 5 6; do
   if mount / -o remount,ro; then
     break
   fi
-  if [ "$try" = 3 ]; then
-    echo "[hub-install] WARNING: / stays writable until the next boot -- something still holds a deleted file open"
+  if [ "$try" = 6 ]; then
+    echo "[hub-install] WARNING: / stays writable until the next boot. Still holding deleted files:"
+    for p in /proc/[0-9]*; do
+      for fd in "$p"/fd/*; do
+        target=$(readlink "$fd" 2>/dev/null) || continue
+        case "$target" in
+          *"(deleted)")
+            case "$target" in
+              /root/*|/opt/*|/usr/*|/etc/*)
+                echo "[hub-install]   $(cat "$p/comm" 2>/dev/null) (${p#/proc/}) -> $target" ;;
+            esac ;;
+        esac
+      done
+    done 2>/dev/null | sort -u | head -5
   else
-    sleep 3
+    sleep 5
   fi
 done
 
