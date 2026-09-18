@@ -36,17 +36,17 @@ apt-get update -y
 # wireless-tools/iw: diag.status() and synchold read the current SSID via
 # iwgetid, and wifi-powersave-off.service needs iw -- Lite images don't
 # promise either.
-PKGS="python3-pip openssl wireguard-tools libzbar0 python3-pil python3-pyzbar openresolv firmware-realtek wireless-tools iw"
+PKGS=(python3-pip openssl wireguard-tools libzbar0 python3-pil python3-pyzbar openresolv firmware-realtek wireless-tools iw)
 if ! command -v ffmpeg > /dev/null; then
-  PKGS="$PKGS ffmpeg"
+  PKGS+=(ffmpeg)
 fi
-echo "[hub-install] installing OS packages ($PKGS)"
+echo "[hub-install] installing OS packages (${PKGS[*]})"
 # libzbar0/python3-pil/python3-pyzbar (not zbar-tools) is the QR-code decode
 # path used by diag.py's import_wg_qr -- zbar-tools' zbarimg CLI drags in the
 # full ImageMagick/libmagickwand stack for image loading, which is the same
 # kind of disk-busting pull as ffmpeg above; the pyzbar+Pillow path needs
 # only these small libs.
-apt-get install -y --no-install-recommends $PKGS
+apt-get install -y --no-install-recommends "${PKGS[@]}"
 
 echo "[hub-install] installing python deps (pycryptodome, paho-mqtt, bleak, anthropic)"
 # anthropic: Claude API SDK for the Assistent tab (1.x needs Python >= 3.10,
@@ -183,8 +183,29 @@ else
   systemctl disable --now smbd nmbd 2>/dev/null || true
 fi
 
+# `install` above replaces the run scripts instead of writing into them, so a
+# running archiveloop keeps reading the copy it started with -- but that
+# deleted inode also keeps / from going read-only again ("mount point is
+# busy", seen on the 2026-09-17 update). Restarting teslausb releases it and
+# picks up the new scripts; the car loses the USB drives for a few seconds.
+if systemctl is-active --quiet teslausb; then
+  echo "[hub-install] restarting teslausb so it runs the new archiveloop"
+  systemctl restart teslausb
+  sleep 5
+fi
+
 echo "[hub-install] remounting / ro"
-mount / -o remount,ro
+sync
+for try in 1 2 3; do
+  if mount / -o remount,ro; then
+    break
+  fi
+  if [ "$try" = 3 ]; then
+    echo "[hub-install] WARNING: / stays writable until the next boot -- something still holds a deleted file open"
+  else
+    sleep 3
+  fi
+done
 
 echo "[hub-install] done."
 echo "  Primary UI: https://$(hostname).local/  (or https://<pi-ip>/)"

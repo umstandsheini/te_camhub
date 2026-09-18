@@ -11,6 +11,7 @@ shellcheck --exclude=SC1091 \
            ./pi-gen-sources/00-teslausb-tweaks/files/rc.local \
            ./run/archiveloop \
            ./hub/hub-update.sh \
+           ./hub/install.sh \
            ./tools/build-image.sh \
            ./setup/pi/apply-first-config.sh \
            ./setup/pi/firstrun-image.sh \
