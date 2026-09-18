@@ -230,3 +230,20 @@ table.tlist tr:first-child td{color:var(--muted);border-top:none}
   .hud{position:sticky;top:0;transform:none;left:auto;margin:0 auto 8px;width:fit-content}
   .nerd{position:static;max-width:none;margin-top:8px}
 }
+
+/* ---------- Kopf-Statusleiste (beim Auto? NAS da?) ---------- */
+.headline{position:fixed;top:10px;right:16px;display:flex;gap:8px;z-index:40}
+.hchip{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;cursor:pointer;
+  background:var(--card);border:1px solid var(--line);color:var(--muted);font-size:12px;font-weight:600;
+  box-shadow:var(--shadow);white-space:nowrap}
+.hchip:hover{border-color:var(--accent2)}
+.hchip .hic{font-size:13px}
+.hchip.ok{color:var(--ok);border-color:#264a34}
+.hchip.warn{color:var(--warn);border-color:#4a3f1e}
+.hchip.bad{color:var(--bad);border-color:#4a2830}
+.hchip.off{opacity:.75}
+@media (max-width:760px){
+  .headline{top:6px;right:8px;gap:6px}
+  .hchip{padding:4px 8px;font-size:11px}
+  .hchip .htxt{display:none}
+}

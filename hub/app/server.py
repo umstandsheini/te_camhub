@@ -889,6 +889,20 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, hubupdate.status())
         if path == "/api/presence":
             return self._json(200, presence.status())
+        if path == "/api/headline":
+            # the two lines the header shows on every page: is the Hub at its
+            # car, and is the paired NAS reachable -- small payload on purpose,
+            # /api/nas/sync_status carries the whole per-clip map.
+            nas, pres = nassync.status(), presence.status()
+            return self._json(200, {
+                "in_car": pres.get("in_car"), "car_configured": pres.get("configured"),
+                "car_last_seen": pres.get("last_seen"), "car_checked": pres.get("checked"),
+                "usb_host": pres.get("usb_host"),
+                "nas_configured": bool(hubconf.getval("ARCHIVE_SERVER")),
+                "nas_ok": nas.get("ok"), "nas_error": nas.get("error"),
+                "nas_checked": nas.get("t"), "nas_percent": nas.get("percent"),
+                "nas_paired": nassync.pairing_status(CFG["state"]).get("paired"),
+            })
         if path == "/api/assistant/state":
             try:
                 since = int(self._qs("since") or 0)

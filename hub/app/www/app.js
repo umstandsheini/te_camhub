@@ -63,15 +63,77 @@ function startApp(){
   $("#auth").classList.add("hidden");$("#app").classList.remove("hidden");
   render("clips");
   checkHubUpdateHint();
+  startHeadline();
 }
 document.querySelectorAll("nav .nav[data-view]").forEach(a=>a.onclick=()=>{
   document.querySelectorAll("nav .nav").forEach(n=>n.classList.remove("active"));
   a.classList.add("active");render(a.dataset.view);
 });
-$("#lockbtn").onclick=async()=>{try{await jpost("api/logout",{});}catch(e){}boot();};
+$("#lockbtn").onclick=async()=>{try{await jpost("api/logout",{});}catch(e){}if(headlineTimer)clearInterval(headlineTimer);const h=$("#headline");if(h)h.remove();boot();};
 $("#auth_go").onclick=doAuth;
 ["auth_pass","auth_pass2"].forEach(id=>$("#"+id).addEventListener("keydown",e=>{if(e.key==="Enter")doAuth();}));
 
+/* ---------------- Kopfzeile: beim Auto? NAS da? ---------------- */
+let headlineTimer=null;
+function headlineBar(){
+  let b=$("#headline");
+  if(!b){
+    b=el("div",null,"");b.id="headline";b.className="headline";
+    b.innerHTML=`<span class="hchip hcar" title="lädt…"><span class="hic">🚗</span><span class="htxt">…</span></span>
+      <span class="hchip hnas" title="lädt…"><span class="hic">🗄️</span><span class="htxt">…</span></span>`;
+    document.body.append(b);
+    b.querySelector(".hcar").onclick=()=>gotoView("ble");
+    b.querySelector(".hnas").onclick=()=>gotoView("clips");
+  }
+  return b;
+}
+function gotoView(v){
+  const a=document.querySelector(`nav .nav[data-view="${v}"]`);
+  if(a)a.click();
+}
+async function refreshHeadline(){
+  const b=headlineBar();
+  const ago=t=>{if(!t)return "nie";const m=Math.round((Date.now()/1000-t)/60);
+    return m<1?"gerade eben":m<60?`vor ${m} min`:`vor ${Math.floor(m/60)} h`;};
+  let s;
+  try{s=await jget("api/headline");}
+  catch(e){return;}
+  const car=b.querySelector(".hcar"),nas=b.querySelector(".hnas");
+  if(!s.car_configured){
+    car.className="hchip hcar off";car.querySelector(".htxt").textContent="Auto?";
+    car.title="Keine VIN hinterlegt oder kein BLE-Schlüssel gekoppelt – der Hub kann nicht prüfen, ob er beim Auto steht.";
+  }else if(s.in_car===true){
+    car.className="hchip hcar ok";car.querySelector(".htxt").textContent="im Auto";
+    car.title=`Gekoppeltes Fahrzeug per Bluetooth bestätigt (${ago(s.car_last_seen)}).`
+      +(s.usb_host?" USB-Laufwerke sind an einem Host eingebunden.":"")+" Klicken für Details.";
+  }else if(s.in_car===false){
+    car.className="hchip hcar warn";car.querySelector(".htxt").textContent="Auto?";
+    car.title=`Fahrzeug antwortet nicht über Bluetooth (zuletzt bestätigt ${ago(s.car_last_seen)}). `
+      +"Das heißt nicht zwingend, dass der Hub weg ist – ein schlafendes oder entferntes Auto antwortet auch nicht.";
+  }else{
+    car.className="hchip hcar off";car.querySelector(".htxt").textContent="Auto?";
+    car.title="Noch nicht geprüft.";
+  }
+  if(!s.nas_configured){
+    nas.className="hchip hnas off";nas.querySelector(".htxt").textContent="kein NAS";
+    nas.title="Kein Archiv-Server eingetragen (Einstellungen → NAS).";
+  }else if(s.nas_ok){
+    nas.className="hchip hnas ok";nas.querySelector(".htxt").textContent="NAS da";
+    nas.title=`Vertrautes NAS erreichbar (geprüft ${ago(s.nas_checked)})`
+      +(s.nas_paired?", gekoppelt":"")+`. Archiviert: ${s.nas_percent}%. Klicken für die Aufnahmen.`;
+  }else if(s.nas_ok===false){
+    nas.className="hchip hnas bad";nas.querySelector(".htxt").textContent="NAS weg";
+    nas.title=`NAS nicht erreichbar: ${s.nas_error||"unbekannter Fehler"} (geprüft ${ago(s.nas_checked)}).`;
+  }else{
+    nas.className="hchip hnas off";nas.querySelector(".htxt").textContent="NAS?";
+    nas.title="Noch nicht geprüft.";
+  }
+}
+function startHeadline(){
+  refreshHeadline();
+  if(headlineTimer)clearInterval(headlineTimer);
+  headlineTimer=setInterval(refreshHeadline,60000);
+}
 function render(view){
   const m=$("#main");m.innerHTML="";
   if(view==="clips")return viewClips(m);
