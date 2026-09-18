@@ -11,14 +11,14 @@ diagnostics APIs. The teslausb core (gadget/snapshots/archive) is untouched.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import ssl, json, argparse, threading, time, secrets, base64, posixpath, hashlib
+import ssl, json, argparse, threading, time, secrets, base64, posixpath, hashlib, math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 from vault import Vault, VaultError
 from viewer import Viewer
 from tesla_auth import TeslaAuth
-import tesla_api, keybridge, hubconf, files as filemod, diag, nassync, mqtt_ha, eventlog, blackbox, canbus, keepawake, synchold, videos, assistant, osupdate, wifinets, boottime, derived, hubupdate
+import tesla_api, keybridge, hubconf, files as filemod, diag, nassync, mqtt_ha, eventlog, blackbox, canbus, keepawake, synchold, videos, assistant, osupdate, wifinets, boottime, derived, hubupdate, presence
 
 WWW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
 
@@ -241,6 +241,8 @@ def nas_sync_loop():
                 _nas_step(errors, "Schlüssel", nassync.push_key_sidecars(CFG["scan"], VAULT))
                 if hubconf.getval("NAS_RAW_KEYS") == "true":
                     _nas_step(errors, "Rohschlüssel", nassync.push_raw_keys(CFG["scan"], VAULT, CFG["state"]))
+            # event.json/thumb.png next to the decrypted clips -- no vault needed
+            _nas_step(errors, "Event-Daten", nassync.mirror_event_files())
             if hubconf.getval("SYNC_ALL_CONTENT") == "true":
                 _nas_step(errors, "Medien", nassync.sync_media())
             if hubconf.getval("BLACKBOX_ENABLED") == "true" and hubconf.getval("SYNC_TRIPS_ENABLED") != "false":
@@ -337,6 +339,7 @@ def mqtt_loop():
                         "temp": (st.get("temp") or "").replace("'C", "").strip(),
                         "wifi_ssid": st.get("wifi_ssid") or "–",
                         "usb_connected": bool(st.get("gadget_active")),
+                        "in_car": bool(presence.status().get("in_car")),
                         "vault_unlocked": VAULT.is_unlocked(),
                         # only once measured -- a numeric HA sensor can't take a placeholder
                         **{k: v for k, v in (("boot_drives", bt.get("drives_s")), ("boot_hub", bt.get("hub_s")))
@@ -458,6 +461,72 @@ _trip = {"active": False, "trip_id": None, "start_ts": None, "start_odometer": N
          "locked": None, "asleep": None, "charging": None}
 
 
+# A learned home zone is only rewritten when the car parks this far from it.
+HOME_LEARN_MIN_M = 60
+
+
+def _remember_location(lat, lon):
+    """Last known position of the car, plain (it is where the car is parked,
+    not a route -- the route itself is encrypted, see blackbox.py) and
+    readable without the vault: wifi-watch.sh uses it to notice that the
+    car is standing at home when the home WiFi can't be seen in a scan (a
+    hidden SSID). Learning the home zone happens in home_zone_loop()."""
+    try:
+        tmp = os.path.join(CFG["state"], "last_location.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"lat": lat, "lon": lon, "ts": time.time()}, f)
+        os.replace(tmp, os.path.join(CFG["state"], "last_location.json"))
+    except OSError:
+        pass
+
+
+def _read_location():
+    try:
+        with open(os.path.join(CFG["state"], "last_location.json"), encoding="utf-8") as f:
+            p = json.load(f)
+        return float(p["lat"]), float(p["lon"]), float(p["ts"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def home_zone_loop():
+    """Learn where "home" is: whenever the Pi is on the home WiFi and a fresh
+    position is known, that position is the home zone (HOME_LAT/HOME_LON).
+    wifi-watch.sh needs it to get the Pi off a phone hotspot at home
+    even when the home SSID never shows up in a scan. Written only when it
+    moves more than HOME_LEARN_MIN_M, so the config isn't rewritten (and the
+    root filesystem remounted) for every GPS wobble."""
+    while True:
+        time.sleep(300)
+        try:
+            home = hubconf.getval("SSID")
+            if not home or diag.status().get("wifi_ssid") != home:
+                continue
+            pos = _read_location()
+            if not pos or time.time() - pos[2] > 7 * 86400:
+                continue
+            lat, lon = pos[0], pos[1]
+            old_lat, old_lon = hubconf.getval("HOME_LAT"), hubconf.getval("HOME_LON")
+            if old_lat and old_lon:
+                try:
+                    if _distance_m(float(old_lat), float(old_lon), lat, lon) < HOME_LEARN_MIN_M:
+                        continue
+                except ValueError:
+                    pass
+            hubconf.write_settings({"home_lat": "%.6f" % lat, "home_lon": "%.6f" % lon})
+            print("[hub] home zone learned from the home WiFi", flush=True)
+        except Exception as e:
+            print("[hub] home zone:", e, flush=True)
+
+
+def _distance_m(lat1, lon1, lat2, lon2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
 def _trip_tick_idle():
     """Out-of-trip cadence: cheap-ish drive-state poll to notice departure."""
     r = diag.ble_read("awake", "drive")
@@ -506,6 +575,8 @@ def _trip_tick_active():
         blackbox.append_point(_trip["trip_id"], time.strftime("%Y-%m-%dT%H:%M:%S"),
                                lat, lon, heading=lv.get("heading"),
                                odometer_mi=odometer_mi, shift_state=shift)
+        _remember_location(lat, lon)
+    presence.note_ble_success()   # the car just answered: it is right here
     if shift == "Park":
         _end_trip()
         return
@@ -816,6 +887,8 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, osupdate.status())
         if path == "/api/hub/update_status":
             return self._json(200, hubupdate.status())
+        if path == "/api/presence":
+            return self._json(200, presence.status())
         if path == "/api/assistant/state":
             try:
                 since = int(self._qs("since") or 0)
@@ -1117,6 +1190,8 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, osupdate.check())
         if path == "/api/os/upgrade":
             return self._json(200, osupdate.start_upgrade())
+        if path == "/api/presence/check":
+            return self._json(200, presence.check())
         if path == "/api/hub/update_check":
             return self._json(200, hubupdate.check())
         if path == "/api/hub/update_install":
@@ -1341,6 +1416,10 @@ def main():
     threading.Thread(target=boottime.loop, daemon=True).start()
     hubupdate.init(a.state)
     threading.Thread(target=hubupdate.check_loop, daemon=True).start()
+    presence.init(a.state)
+    presence.set_trip_probe(lambda: _trip["active"])
+    threading.Thread(target=presence.loop, daemon=True).start()
+    threading.Thread(target=home_zone_loop, daemon=True).start()
     threading.Thread(target=autolock_loop, daemon=True).start()
     threading.Thread(target=key_fetch_loop, daemon=True).start()
     threading.Thread(target=nas_sync_loop, daemon=True).start()

@@ -12,6 +12,8 @@ shellcheck --exclude=SC1091 \
            ./run/archiveloop \
            ./hub/hub-update.sh \
            ./hub/install.sh \
+           ./hub/wifi-watch.sh \
+           ./hub/wg-watch.sh \
            ./tools/build-image.sh \
            ./setup/pi/apply-first-config.sh \
            ./setup/pi/firstrun-image.sh \

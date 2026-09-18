@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every minute which WiFi the Pi should be on
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+Unit=teslacam-wifi-watch.service
+
+[Install]
+WantedBy=timers.target

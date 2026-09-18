@@ -1,0 +1,7 @@
+[Unit]
+Description=Keep the Pi on the best known WiFi (and the AP only as a fallback)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/teslacam-hub/wifi-watch.sh

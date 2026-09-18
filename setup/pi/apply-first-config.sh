@@ -44,7 +44,10 @@ then
   NMFILE="/etc/NetworkManager/system-connections/${SSID//\//_}.nmconnection"
   (
     umask 077
-    printf '[connection]\nid=%s\nuuid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=true\n\n[wifi]\nmode=infrastructure\nssid=%s\nhidden=true\n\n' \
+    # No hidden=true: it only matters for an SSID that isn't broadcast, and it
+    # would make home-wifi-watch.sh try a connect on the road (a hidden
+    # network can never show up in a scan) instead of only when at home.
+    printf '[connection]\nid=%s\nuuid=%s\ntype=wifi\ninterface-name=wlan0\nautoconnect=true\n\n[wifi]\nmode=infrastructure\nssid=%s\n\n' \
       "$SSID" "$(cat /proc/sys/kernel/random/uuid)" "$SSID"
     if [ -n "${WIFIPASS:-}" ]
     then

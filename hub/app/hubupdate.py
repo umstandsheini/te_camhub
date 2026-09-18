@@ -273,6 +273,12 @@ def make_backup(installed):
     os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
     name = "hub-%s-%s.tar.gz" % (re.sub(r"[^\w.-]", "_", installed), time.strftime("%Y%m%d-%H%M%S"))
     final = os.path.join(BACKUP_DIR, name)
+    # The stamp is second-resolution: two runs in the same second would
+    # otherwise overwrite each other's backup.
+    serial = 1
+    while os.path.exists(final):
+        serial += 1
+        final = os.path.join(BACKUP_DIR, name[:-len(".tar.gz")] + "-%d.tar.gz" % serial)
     tmp = final + ".part"
     paths = []
     for pattern in BACKUP_PATHS:

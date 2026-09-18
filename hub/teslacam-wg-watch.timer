@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 2 minutes whether the WireGuard tunnel is alive
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+Unit=teslacam-wg-watch.service
+
+[Install]
+WantedBy=timers.target

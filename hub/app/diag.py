@@ -554,22 +554,23 @@ def apply_ap_on_usb(enabled, ssid=None, password=None, ap_ip=None):
                 return {"ok": False, "error": (r.stderr or "AP-Einrichtung auf USB fehlgeschlagen").strip()[:200]}
         else:
             return {"ok": False, "error": "Access-Point-SSID/-Passwort fehlen"}
-        subprocess.run(["systemctl", "disable", "--now", "teslacam-ap-fallback.timer"], capture_output=True)
         return {"ok": True}
     finally:
         subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
 
 
 def apply_ap_fallback(enabled, ssid=None, password=None, ap_ip=None):
-    """Toggle 'AP only as fallback when home WiFi is unavailable' mode.
+    """Toggle 'AP only as fallback when no known WiFi is reachable' mode.
 
     Enabling: makes sure the TESLAUSB_AP NetworkManager profile exists
     (creating it via ap-ensure.sh if needed -- requires ssid+password the
     first time; ap-ensure.sh's template already bakes in autoconnect=false)
-    and enables the watcher timer that brings it up/down based on WLAN
-    connectivity.
-    Disabling: stops the watcher and reverts to teslausb's normal
-    always-on secondary-AP behavior (autoconnect back on, AP started now).
+    and leaves it to wifi-watch.sh (timer, every minute) to bring it up
+    only after a few runs without any known WiFi in range.
+    Disabling: back to teslausb's always-on secondary AP (autoconnect back
+    on, AP started now). Only sensible with a USB WiFi adapter: on the
+    built-in chip the AP holds the radio on its own channel, which is what
+    keeps the client from joining a phone hotspot elsewhere.
 
     Every branch here ends up writing to the root filesystem (NetworkManager's
     keyfile plugin persists connection profiles under
@@ -596,10 +597,8 @@ def apply_ap_fallback(enabled, ssid=None, password=None, ap_ip=None):
                     return {"ok": False, "error": (r.stderr or "AP-Einrichtung fehlgeschlagen").strip()[:200]}
             else:
                 _set_ap_autoconnect(False)
-            subprocess.run(["systemctl", "enable", "--now", "teslacam-ap-fallback.timer"], capture_output=True)
-            subprocess.run(["bash", "/opt/teslacam-hub/ap-fallback-watch.sh"], capture_output=True)
+            subprocess.run(["bash", "/opt/teslacam-hub/wifi-watch.sh"], capture_output=True)
         else:
-            subprocess.run(["systemctl", "disable", "--now", "teslacam-ap-fallback.timer"], capture_output=True)
             if has_ap:
                 _set_ap_autoconnect(True)
                 subprocess.run(["nmcli", "con", "up", "TESLAUSB_AP"], capture_output=True)
@@ -612,7 +611,7 @@ def ap_fallback_status():
     """Live status for the UI's on/off button: whether the feature is
     enabled, the watcher timer is running, and -- read straight from
     NetworkManager's active-connection list, same fields
-    ap-fallback-watch.sh itself checks -- whether the AP is broadcasting
+    wifi-watch.sh itself checks -- whether the AP is broadcasting
     right now vs. home WiFi is currently connected. Note: while the AP is
     up, home_wifi_connected reflects whatever NetworkManager currently
     reports for wlan0, but this Pi's chip has shown flakiness running
@@ -620,7 +619,7 @@ def ap_fallback_status():
     or slow-to-update reading here as a symptom of that, not a bug in this
     status check itself."""
     enabled = hubconf.getval("AP_FALLBACK_ONLY") == "true"
-    timer_active = _svc_active("teslacam-ap-fallback.timer")
+    timer_active = _svc_active("teslacam-wifi-watch.timer")
     r = subprocess.run(["nmcli", "-t", "-f", "TYPE,DEVICE", "c", "show", "--active"],
                         capture_output=True, text=True)
     active_wifi_devices = [l.split(":", 1)[1] for l in (r.stdout or "").splitlines()

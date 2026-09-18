@@ -46,6 +46,8 @@ SENSORS = {
     "temp":      ("sensor", "Pi-Temperatur", "temperature", "°C", None),
     "wifi_ssid": ("sensor", "WLAN", None, None, "mdi:wifi"),
     "usb_connected": ("binary_sensor", "USB am Auto", "connectivity", None, None),
+    # presence.py: the paired car answered over BLE, so the Hub is next to it
+    "in_car": ("binary_sensor", "Beim Auto (BLE)", "presence", None, "mdi:car-connected"),
     "vault_unlocked": ("binary_sensor", "Tresor entsperrt", "lock", None, None),
     # this boot's timing (boottime.py): seconds from power-on
     "boot_drives": ("sensor", "Start: Laufwerke bereit", "duration", "s", "mdi:timer-outline"),

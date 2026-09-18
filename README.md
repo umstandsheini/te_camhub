@@ -210,6 +210,43 @@ Das Heim-WLAN (`SSID`/`WIFIPASS`) hat immer Vorrang. Darunter eine sortierbare L
 
 Entschlüsselte Videos liegen nur im RAM (`/dev/shm`) und verschwinden beim Sperren des Tresors und bei jedem Neustart. Vorschaubilder und Fahrdaten (GPS, Tempo, Gang) behält der Hub zusätzlich **verschlüsselt auf der SSD** (`/backingfiles/decrypt-viewer-state/derived/`): versiegelt mit dem Tresor-Hauptschlüssel (AES-256-GCM, dasselbe Verfahren wie bei den Schlüssel-Dateien neben den Clips), Fahrdaten vorher komprimiert, Dateinamen nur ein Hash der Clip-Kennung. Nach dem Anmelden sind Übersicht und Kartenpunkte damit sofort da, ohne jeden Clip (~36 MB) erneut zu entschlüsseln; ein ausgebauter Stick bleibt trotzdem wertlos. Fahrdaten für die Kartenpunkte werden direkt aus der Kopie gelesen, nicht in den RAM gelegt; in den RAM kommt nur, was der Player gerade abspielt. Kopien älter als 120 Tage werden entfernt, beim Zurücksetzen des Tresors alle.
 
+## WLAN-Auswahl und Access Point (Einstellungen → WLAN-Netze)
+
+Zwei Fallen, beide im Auto aufgetreten:
+
+- **NetworkManager wechselt nicht von selbst zurück.** Die Priorität entscheidet nur, *während* er ein Netz auswählt. Einmal mit einem Handy-Hotspot verbunden, bleibt der Pi dort, auch wenn das Heim-WLAN wieder in Reichweite ist (18.09.2026: online über ein Handy im Auto, aber zu Hause unsichtbar – kein Zugriff, kein NAS-Abgleich, keine Home-Assistant-Daten).
+- **Der eigene Access Point blockiert das Funkgerät.** Ohne USB-WLAN-Stick teilen sich Access Point (`ap0`) und Client (`wlan0`) ein Funkgerät; der Access Point nagelt den Client auf seinen Kanal fest. Ein Handy-Hotspot auf einem anderen Kanal ist dann kaum erreichbar.
+
+`hub/wifi-watch.sh` (Timer, jede Minute) übernimmt deshalb beide Aufgaben – es ersetzt die früheren Einzelwächter für AP-Rückfall und Heim-WLAN, die sich gegenseitig im Weg standen:
+
+1. **Bekannte Netze, bestes zuerst:** Heim-WLAN, danach die Liste aus den Einstellungen in ihrer Reihenfolge.
+2. Auf dem besten erreichbaren Netz verbunden → nichts zu tun, Access Point aus.
+3. Auf einem schlechteren verbunden → wechseln (das deckt „zurück nach Hause“ und „besserer Hotspot in Reichweite“ ab).
+4. Gar nicht verbunden → erst den Access Point herunternehmen (Funkgerät frei), dann suchen und das beste bekannte Netz verbinden.
+5. Findet er dreimal in Folge nichts Bekanntes → Access Point an, als Zugang wenn sonst nichts geht.
+
+Das Heim-WLAN gilt zusätzlich als erreichbar, wenn das Auto laut letzter bekannter Position in der **Zuhause-Zone** steht (`HOME_LAT`/`HOME_LON`, Umkreis `HOME_RADIUS_M`, Standard 150 m) oder – solange keine Zone bekannt ist – sein Profil ein **verstecktes** Netz ist, das im Scan nie auftauchen kann. Die Zone lernt der Hub selbst, sobald er im Heim-WLAN hängt und eine Position vom Auto kennt (`home_zone_loop` in `server.py`); die Position steht unverschlüsselt in `last_location.json` – sie ist der Parkplatz, nicht die Route, die Route bleibt verschlüsselt.
+
+Ein fehlgeschlagener Verbindungsversuch pausiert 10 Minuten. Standardmäßig ist der Access Point **nur Rückfall** (`AP_FALLBACK_ONLY=true`); `false` hält ihn dauerhaft an, was nur mit USB-WLAN-Stick (zweites Funkgerät) sinnvoll ist. Ganz abschalten lässt sich der Wächter mit `HOME_WIFI_PREFER=false`. Protokoll: `/mutable/home-wifi.log`.
+
+## Ereignis-Daten bei den entschlüsselten Clips
+
+Das Auto legt zu jedem Sentry-/Saved-Ereignis `event.json` (Auslöser, Zeitpunkt, Position) und `thumb.png` neben die Videos, und teslausb archiviert beides zuverlässig nach `TeslaCam/EncryptedClips/…`. Wer die Clips auf dem NAS entschlüsselt (z. B. Te_FITI), bekommt die Videos nach `decrypted/EncryptedClips/…` — **ohne** diese beiden Dateien, und mit `delete_originals` verschwindet die verschlüsselte Quelle danach. Ein Viewer, der den entschlüsselten Zweig indiziert, zeigt dann zu keinem verschlüsselten Ereignis mehr einen Grund, ein Vorschaubild oder das ausgelöste Segment. Gemessen am 18.09.2026: 110 von 110 Ereignisordnern unter `EncryptedClips` hatten beide Dateien, 0 von 548 entschlüsselten Ordnern.
+
+`nassync.mirror_event_files()` (läuft im NAS-Abgleich, alle 10 Minuten) kopiert sie deshalb in den entschlüsselten Ordner, sobald dieser existiert und die Datei dort fehlt — nur kopieren, nie löschen, nie überschreiben. Der Tresor wird dafür nicht gebraucht. Beim ersten Lauf am 18.09.2026 wanderten 250 Dateien nach, rückwirkend für alle betroffenen Ereignisse.
+
+## „Ist der Hub beim Auto?“ (Fahrzeug-Seite)
+
+Von der USB-Seite kann der Pi nicht erkennen, an welchem Auto er steckt — das Gadget weiß nur, dass *irgendein* Host die Laufwerke eingebunden hat. Eindeutig ist nur die BLE-Kopplung: `tesla-control` spricht genau die hinterlegte VIN an, authentifiziert mit dem Schlüssel, den dieses Fahrzeug akzeptiert hat. `presence.py` schickt deshalb alle 10 Minuten einen kurzen `ping` und zeigt das Ergebnis auf der Fahrzeug-Seite, im Ereignis-Log (nur bei Wechseln) und als HA-Sensor „Beim Auto (BLE)“.
+
+Was das beweist: Das gekoppelte Fahrzeug ist in Bluetooth-Reichweite, also wenige Meter entfernt. Was es **nicht** beweist: dass der Hub eingesteckt ist — und ein schlafendes oder weit entferntes Auto antwortet einfach nicht. Ausbleibende Antwort ist deshalb kein Diebstahlalarm. Drei Fehlversuche in Folge sind nötig, bevor der Zustand auf „nicht bestätigt“ wechselt; während einer Fahrt genügen die ohnehin laufenden BLE-Abfragen. `ping` weckt kein schlafendes Auto.
+
+## WireGuard-Wächter
+
+Mit `WG_ALLOWED_IPS=0.0.0.0/0,::/0` (der Vorgabe für „VPN nach Hause“) leitet wg-quick **allen** Internetverkehr in den Tunnel und setzt den DNS-Server der Gegenstelle. Antwortet die nicht, bleibt der Pi ohne Namensauflösung und ohne Internet — während das Heimnetz weiterläuft, es also von außen nicht kaputt aussieht. Am 18.09.2026 war genau das der Fall: nie ein Handshake, 177 KB gesendet, 0 empfangen; der Hub kam weder an GitHub noch an Tesla, und der tote Resolver-Eintrag `192.168.6.1` überlebte den Tunnel selbst (resolvconf-Datensatz `wg0`).
+
+`hub/wg-watch.sh` (Timer, alle 2 Minuten) stoppt einen solchen Tunnel: kein Handshake seit 180 s **und** voller Tunnel → `wg-quick` stoppen, den resolvconf-Datensatz entfernen, alle 30 Minuten neu versuchen. Ein geteilter Tunnel (ohne Standardroute) bleibt unangetastet, weil ein toter dort nichts kostet. `WG_ENABLED=false` schaltet den Wächter ganz ab. Protokoll: `/mutable/wg-watch.log`.
+
 ## GPS-Fahrtenbuch (verschlüsselt)
 
 Die Blackbox zeichnet während der Fahrt alle 10 s Position, Richtung, Kilometerstand und Gang auf – ein Bewegungsprofil. Seit dem 15.09.2026 landet davon nichts mehr im Klartext auf der SSD. Weil der Tresor beim Fahren fast immer gesperrt ist (jeder Stromausfall sperrt ihn), verschlüsselt der Hub mit einem Schlüsselpaar: Der öffentliche Schlüssel liegt neben den Fahrten (`blackbox/trips.pub`) und reicht zum Schreiben, der private (RSA-3072) liegt im Tresor. Jede Fahrt-Datei (`*.tbx`) bekommt pro Hub-Start einen eigenen AES-256-Schlüssel, jeder Punkt wird einzeln mit AES-256-GCM verschlüsselt angehängt – ein Stromausfall kostet höchstens den Punkt, der gerade geschrieben wurde. Fahrtenliste, GPX-Export und die Übertragung aufs NAS brauchen deshalb den entsperrten Tresor; die km-Angabe bei „Fahrt beendet“ im Ereignis-Log kommt aus dem RAM. Das Schlüsselpaar entsteht beim ersten Anmelden nach dem Update; bis dahin aufgezeichnete Punkte liegen nur im RAM. Ältere Fahrten im Klartext (`*.jsonl`) werden beim ersten Anmelden verschlüsselt, der Klartext überschrieben und gelöscht (auf einer SSD ist das Überschreiben nicht garantiert). Beim Zurücksetzen des Tresors werden die verschlüsselten Fahrten gelöscht. Auf dem NAS liegen die Fahrten weiterhin als lesbare GPX-Dateien (`Fahrten/`).

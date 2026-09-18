@@ -112,14 +112,29 @@ systemctl enable teslacam-latest-snapshot.timer
 systemctl start teslacam-latest-snapshot.timer
 systemctl start teslacam-latest-snapshot.service
 
-echo "[hub-install] installing AP-fallback + AP-on-USB helper scripts (off until enabled in Einstellungen)"
-cp "$HUB_SRC/ap-ensure.sh" "$HUB_DST/ap-ensure.sh"
-cp "$HUB_SRC/ap-fallback-watch.sh" "$HUB_DST/ap-fallback-watch.sh"
-cp "$HUB_SRC/ap-usb-ensure.sh" "$HUB_DST/ap-usb-ensure.sh"
-chmod +x "$HUB_DST/ap-ensure.sh" "$HUB_DST/ap-fallback-watch.sh" "$HUB_DST/ap-usb-ensure.sh"
-cp "$HUB_SRC/teslacam-ap-fallback.service" /etc/systemd/system/teslacam-ap-fallback.service
-cp "$HUB_SRC/teslacam-ap-fallback.timer" /etc/systemd/system/teslacam-ap-fallback.timer
+echo "[hub-install] installing AP + AP-on-USB helper scripts (the AP itself is managed by wifi-watch.sh)"
+install -m 755 "$HUB_SRC/ap-ensure.sh" "$HUB_DST/ap-ensure.sh"
+install -m 755 "$HUB_SRC/ap-usb-ensure.sh" "$HUB_DST/ap-usb-ensure.sh"
+
+echo "[hub-install] installing the WiFi watcher + timer (best known WiFi, AP only as a fallback)"
+install -m 755 "$HUB_SRC/wifi-watch.sh" "$HUB_DST/wifi-watch.sh"
+cp "$HUB_SRC/teslacam-wifi-watch.service" /etc/systemd/system/teslacam-wifi-watch.service
+cp "$HUB_SRC/teslacam-wifi-watch.timer" /etc/systemd/system/teslacam-wifi-watch.timer
+# Superseded: ap-fallback-watch.sh only ever switched the AP, home-wifi-watch.sh
+# only the way back home, and they fought over the radio. wifi-watch.sh does both.
+systemctl disable --now teslacam-ap-fallback.timer teslacam-home-wifi.timer 2>/dev/null || true
+rm -f /etc/systemd/system/teslacam-ap-fallback.{service,timer} \
+      /etc/systemd/system/teslacam-home-wifi.{service,timer} \
+      "$HUB_DST/ap-fallback-watch.sh" "$HUB_DST/home-wifi-watch.sh"
 systemctl daemon-reload
+systemctl enable --now teslacam-wifi-watch.timer
+
+echo "[hub-install] installing the WireGuard watchdog + timer (a dead full tunnel swallows all internet)"
+install -m 755 "$HUB_SRC/wg-watch.sh" "$HUB_DST/wg-watch.sh"
+cp "$HUB_SRC/teslacam-wg-watch.service" /etc/systemd/system/teslacam-wg-watch.service
+cp "$HUB_SRC/teslacam-wg-watch.timer" /etc/systemd/system/teslacam-wg-watch.timer
+systemctl daemon-reload
+systemctl enable --now teslacam-wg-watch.timer
 
 echo "[hub-install] installing hotspot + WireGuard helper scripts (off until enabled in Einstellungen)"
 cp "$HUB_SRC/hotspot-ensure.sh" "$HUB_DST/hotspot-ensure.sh"
@@ -144,6 +159,13 @@ if [ -f "$CONF" ] && [ -z "$(getconf_val SSH_DISABLE_PASSWORD)" ]; then
   mkdir -p /etc/ssh/sshd_config.d
   echo "PasswordAuthentication no" > /etc/ssh/sshd_config.d/99-teslausb.conf
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+fi
+# Without a USB WiFi adapter the Pi's own access point shares the single radio
+# with the client and pins it to the AP's channel -- a phone hotspot on another
+# channel is then hard to join. So the AP defaults to fallback-only; set
+# AP_FALLBACK_ONLY=false (Einstellungen) to keep it up permanently.
+if [ -f "$CONF" ] && [ -z "$(getconf_val AP_FALLBACK_ONLY)" ]; then
+  echo "export AP_FALLBACK_ONLY='true'" >> "$CONF"
 fi
 if [ -f "$CONF" ] && [ -z "$(getconf_val VAULT_AUTOLOCK_MIN)" ]; then
   echo "export VAULT_AUTOLOCK_MIN='180'" >> "$CONF"

@@ -864,10 +864,38 @@ function syncHoldText(h){
   }
   return "bereit – greift, sobald Heim-WLAN und NAS erreichbar sind";
 }
+function presenceCard(card){
+  card.innerHTML=`<h3>Beim Auto?</h3>
+    <div class="note">Geprüft wird das über Bluetooth: Antwortet das gekoppelte Fahrzeug (die hinterlegte VIN) auf einen kurzen <code>ping</code>, steht der Hub in dessen Nähe. Das weckt kein schlafendes Auto und belegt nur kurz die Bluetooth-Verbindung. Der Hub prüft alle 10 Minuten; während einer Fahrt genügen die ohnehin laufenden Abfragen.</div>
+    <div class="note warn">Das beweist Nähe (wenige Meter), nicht das Eingestecktsein – und ein schlafendes oder weit entferntes Auto antwortet einfach nicht. Ausbleibende Antwort ist also kein Diebstahlalarm.</div>
+    <div class="note pres_status">lädt…</div>
+    <div class="saverow"><button class="btn sm ghost pres_check">Jetzt prüfen</button><span class="note pres_msg"></span></div>`;
+  const q=s=>card.querySelector(s);
+  const when=t=>t?new Date(t*1000).toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"}):"–";
+  const ago=t=>{if(!t)return "";const m=Math.round((Date.now()/1000-t)/60);return m<1?"gerade eben":m<60?`vor ${m} min`:`vor ${Math.floor(m/60)} h ${m%60} min`;};
+  function render(s){
+    let txt;
+    if(!s.configured)txt="✗ Keine VIN hinterlegt oder kein BLE-Schlüssel gekoppelt – Prüfung nicht möglich.";
+    else if(s.in_car===true)txt=`✅ Fahrzeug bestätigt (${ago(s.last_seen)}), seit ${when(s.since)}`;
+    else if(s.in_car===false)txt=`❔ Fahrzeug antwortet nicht${s.error?" ("+s.error+")":""} · zuletzt bestätigt: ${when(s.last_seen)}`;
+    else txt="Noch nicht geprüft.";
+    if(s.checked)txt+=` · geprüft ${ago(s.checked)}`;
+    if(s.usb_host)txt+=" · USB-Laufwerke sind gerade an einem Host eingebunden";
+    q(".pres_status").textContent=txt;
+  }
+  q(".pres_check").onclick=async()=>{
+    q(".pres_check").disabled=true;q(".pres_msg").textContent="frage das Auto…";
+    try{render(await jpost("api/presence/check",{}));q(".pres_msg").textContent="";}
+    catch(e){q(".pres_msg").textContent="✗ Verbindungsfehler";}
+    q(".pres_check").disabled=false;
+  };
+  jget("api/presence").then(render).catch(()=>{q(".pres_status").textContent="✗ Fehler beim Laden";});
+}
 /* ---------------- Fahrzeug (BLE) ---------------- */
 async function viewBle(m){
   m.append(el("h2","title","Fahrzeug (BLE)"));
   let c;try{c=await jget("api/settings");}catch(e){c={};}
+  const pres=el("div","card");m.append(pres);presenceCard(pres);
   const box=el("div");box.innerHTML=`
     <div class="card"><h3>Fahrzeug</h3>
       ${fld("Fahrzeug-VIN","ble_vin","text",c.tesla_ble_vin)}
@@ -1511,6 +1539,10 @@ async function viewSettings(m){
       ${fld("SSID","wifi_new_ssid","text","","z. B. Mein iPhone")}
       ${fld("Passwort (leer = offenes Netz; bei einem schon eingetragenen Netz leer = unverändert)","wifi_new_pass","password","")}
       <div class="saverow"><button class="btn sm" id="wifi_add">Hinzufügen / Passwort ändern</button><span class="note" id="wifi_msg"></span></div>
+      <div class="note" style="margin-top:14px"><b>Automatische WLAN-Wahl:</b> NetworkManager wechselt von sich aus nicht zurück – einmal mit einem Handy-Hotspot verbunden, bleibt der Pi dort, auch wenn das Heim-WLAN wieder in Reichweite ist. Und solange der eigene Access Point läuft, hängt der Client auf dessen Funkkanal fest und findet unterwegs den Hotspot kaum. Mit dieser Option prüft der Pi jede Minute, welches bekannte Netz das beste erreichbare ist (Heim-WLAN zuerst, dann diese Liste), nimmt dafür nötigenfalls den Access Point herunter und wechselt. Zu Hause zählt auch die gelernte Zuhause-Zone, falls das Heim-WLAN im Scan fehlt. Findet er dreimal nichts Bekanntes, geht der Access Point wieder an.</div>
+      ${chk("Automatisch ins beste bekannte WLAN wechseln (empfohlen)","s_home_wifi_prefer",c.home_wifi_prefer!=='false')}
+      <div class="note" id="homezone_note">${c.home_lat&&c.home_lon?`Zuhause-Zone gelernt: ${(+c.home_lat).toFixed(4)}, ${(+c.home_lon).toFixed(4)} · Umkreis ${c.home_radius_m||150} m`:"Zuhause-Zone noch nicht gelernt – der Hub merkt sie sich, sobald er im Heim-WLAN hängt und eine Position vom Auto kennt."}</div>
+      <div class="saverow"><span class="note" id="home_wifi_msg"></span></div>
     </div>
     <div class="card"><h3>WireGuard-VPN (nach Hause)</h3>
       <div class="note">Baut unterwegs (z. B. über den Handy-Hotspot oben) eine verschlüsselte VPN-Verbindung zu einem WireGuard-Server zu Hause auf -- für Fernzugriff auf den Hub, ohne einen Port im Heimnetz nach außen öffnen zu müssen. Den öffentlichen Schlüssel unten in die Peer-Konfiguration des Heim-Servers eintragen, dann hier Peer-Daten eintragen, speichern und einschalten.</div>
@@ -1869,6 +1901,13 @@ async function viewSettings(m){
     if(await wifiOp("add",{ssid:s,password:$("#wifi_new_pass").value})){$("#wifi_new_ssid").value="";$("#wifi_new_pass").value="";}
   };
   jget("api/wifi/networks").then(renderWifi).catch(()=>{});
+  $("#s_home_wifi_prefer").onchange=async e=>{
+    $("#home_wifi_msg").textContent="speichere…";
+    try{
+      const r=await jpost("api/settings",{home_wifi_prefer:e.target.checked});
+      $("#home_wifi_msg").textContent=r.ok?"✓ gespeichert":"✗ "+(r.error||"Fehler");
+    }catch(err){$("#home_wifi_msg").textContent="✗ Verbindungsfehler";}
+  };
   $("#wg_qr_import").onclick=async()=>{
     const file=($("#wg_qr_file").files||[])[0];
     if(!file){$("#wg_qr_msg").textContent="✗ bitte zuerst ein Bild auswählen";return;}

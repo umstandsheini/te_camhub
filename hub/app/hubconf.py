@@ -82,12 +82,17 @@ FIELD_MAP = {
     "viewer_extra_roots": "VIEWER_EXTRA_ROOTS",
     "samba_enabled": "SAMBA_ENABLED",
     "wifi_networks": "WIFI_NETWORKS",   # JSON list, managed by wifinets.py
+    # wifi-watch.sh: best known WiFi, AP only as a fallback
+    "home_wifi_prefer": "HOME_WIFI_PREFER",
+    "home_lat": "HOME_LAT",
+    "home_lon": "HOME_LON",
+    "home_radius_m": "HOME_RADIUS_M",
 }
 BOOLS = {"archive_recentclips", "archive_savedclips", "archive_sentryclips",
          "archive_trackmodeclips", "pushover_enabled", "telegram_enabled", "ap_fallback_only",
          "sync_all_content", "ssh_disable_password", "mqtt_enabled", "nas_raw_keys", "blackbox_enabled",
          "sync_trips_enabled", "samba_enabled", "hotspot_enabled", "wg_enabled",
-         "sync_hold_enabled", "nas_skip_deleted"}
+         "sync_hold_enabled", "nas_skip_deleted", "home_wifi_prefer"}
 INTS = {"snapshot_interval", "archive_delay", "retention_days",
         "retention_free_gb", "vault_autolock_min", "mqtt_port", "wg_keepalive",
         "archive_savedclips_last_minutes", "archive_bwlimit_kbps", "sync_hold_max_min"}
@@ -133,6 +138,10 @@ def read_settings():
         out["sync_hold_max_min"] = str(120)  # synchold.DEFAULT_MAX_MIN
     if not out.get("nas_skip_deleted"):
         out["nas_skip_deleted"] = "true"     # opt-out too -- matches nassync.skip_deleted()
+    if not out.get("home_wifi_prefer"):
+        out["home_wifi_prefer"] = "true"     # opt-out too -- matches wifi-watch.sh
+    if not out.get("home_radius_m"):
+        out["home_radius_m"] = "150"
     return out
 
 

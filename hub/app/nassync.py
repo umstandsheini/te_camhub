@@ -55,7 +55,7 @@ Camera-clip-observing jobs, both driven by nas_sync_loop() in server.py:
     called every 60s from key_fetch_loop() in server.py, not
     nas_sync_loop(), since it needs no NAS configured at all.
 """
-import os, re, json, time, base64, secrets, datetime, subprocess, tempfile, threading, fcntl
+import os, re, json, time, base64, secrets, shutil, datetime, subprocess, tempfile, threading, fcntl
 import hubconf
 import blackbox
 import diag
@@ -538,6 +538,89 @@ def sync_trips(active_trip_id=None):
 
 KEYS_MNT = "/tmp/hub_nas_keys"
 RAWKEYS_MNT = "/tmp/hub_nas_rawkeys"
+EVENTS_MNT = "/tmp/hub_nas_events"
+EVENT_FILES = ("event.json", "thumb.png")
+DECRYPTED = "decrypted"
+_events_cache = {"t": 0.0, "ok": None, "error": None, "copied": 0, "pending": 0}
+
+
+def events_status():
+    with _guard:
+        return dict(_events_cache)
+
+
+def mirror_event_files():
+    """Put event.json/thumb.png next to the decrypted clips as well.
+
+    Te_FITI decrypts TeslaCam/EncryptedClips/<folder>/*.mp4 into
+    decrypted/EncryptedClips/<folder>/ and (with delete_originals) removes
+    the encrypted originals afterwards -- but it doesn't take the event
+    metadata along, and nothing else does either. A viewer that indexes the
+    decrypted tree then shows no trigger reason, no highlighted segment and
+    no thumbnail for every encrypted event, which is what
+    EVENT_JSON_ENCRYPTED_CLIPS_ISSUE.md chased on the NAS side. Measured
+    2026-09-18: 110 of 110 event folders under EncryptedClips have both
+    files, 0 of 548 decrypted folders do -- nothing was ever lost, the two
+    files simply never travel.
+
+    Copy only: never deletes, never overwrites, skips folders that already
+    have the file. Runs from nas_sync_loop like the key sidecars."""
+    mnt = EVENTS_MNT
+    copied, pending, errors = 0, 0, []
+    _op_lock.acquire()
+    try:
+        full = (hubconf.getval("SHARE_NAME") or "").strip("/")
+        share_root, _, clips_subpath = full.partition("/")
+        try:
+            _mount(mnt, rw=True, share=share_root)
+        except Exception as e:
+            with _guard:
+                _events_cache.update(t=time.time(), ok=False, error=str(e)[:200])
+            return {"ok": False, "error": str(e)[:200]}
+        try:
+            enc_root = os.path.join(mnt, clips_subpath) if clips_subpath else mnt
+            dec_root = os.path.join(mnt, DECRYPTED)
+            if not os.path.isdir(dec_root):
+                with _guard:
+                    _events_cache.update(t=time.time(), ok=True, error=None, copied=0, pending=0)
+                return {"ok": True, "copied": 0, "skipped": "kein decrypted-Ordner auf dem NAS"}
+            for group in ("SavedClips", "SentryClips", "TeslaTrackMode"):
+                gdir = os.path.join(enc_root, group)
+                if not os.path.isdir(gdir):
+                    continue
+                for event in sorted(os.listdir(gdir)):
+                    if event.startswith("."):
+                        continue
+                    src = os.path.join(gdir, event)
+                    if not os.path.isdir(src):
+                        continue
+                    # Te_FITI mirrors the EncryptedClips/ prefix; older layouts don't.
+                    for dst in (os.path.join(dec_root, "EncryptedClips", group, event),
+                                os.path.join(dec_root, group, event)):
+                        if not os.path.isdir(dst):
+                            continue
+                        for name in EVENT_FILES:
+                            s, d = os.path.join(src, name), os.path.join(dst, name)
+                            if not os.path.isfile(s) or os.path.isfile(d):
+                                continue
+                            try:
+                                tmp = d + ".tmp"
+                                shutil.copyfile(s, tmp)
+                                os.replace(tmp, d)
+                                copied += 1
+                            except OSError as e:
+                                pending += 1
+                                errors.append("%s/%s: %s" % (event, name, e))
+        finally:
+            _umount(mnt)
+    finally:
+        _op_lock.release()
+    if copied:
+        print("[hub] event-Daten zu den entschlüsselten Clips kopiert: %d" % copied, flush=True)
+    with _guard:
+        _events_cache.update(t=time.time(), ok=not errors, error="; ".join(errors[:3]) or None,
+                             copied=copied, pending=pending)
+    return {"ok": not errors, "copied": copied, "errors": errors[:5]}
 
 
 def _archived_with_key(mnt, keys, suffix):
