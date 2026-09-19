@@ -1,5 +1,17 @@
 # TeslaCam Hub
 
+> **Self-hosted Tesla dashcam & Sentry Mode hub for the Raspberry Pi** — a
+> [teslausb](https://github.com/marcone/teslausb) fork with a single web UI:
+> decrypts Tesla **2026.20+ encrypted dashcam clips** (`EncryptedClips`),
+> synced multi-camera viewer with telemetry HUD and GPS map, NAS archiving,
+> an encrypted key vault, plus Home Assistant (MQTT) and BLE vehicle access.
+>
+> 📄 **Findings — how Tesla encrypts dashcam clips (and why `event.json` /
+> `thumb.png` can't be decrypted off the car):**
+> [doc/tesla-dashcam-encryption.md](doc/tesla-dashcam-encryption.md).
+> Keywords: tesla dashcam encryption, decrypt EncryptedClips, event.json
+> encrypted, eCryptfs `_CONSOLE`, dashcam.tesla.com key, sentry mode.
+
 Ein Fork von [teslausb](https://github.com/marcone/teslausb), der die alte Weboberfläche
 (nginx + cgi-bin + iframe) durch einen einzigen Python-Dienst ("Hub") ersetzt: HTTPS +
 Login, Video-Viewer mit On-Demand-Entschlüsselung, Datei-Browser, NAS-Sync,
