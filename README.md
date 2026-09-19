@@ -243,6 +243,32 @@ Das Auto legt zu jedem Sentry-/Saved-Ereignis `event.json` (Auslöser, Zeitpunkt
 
 **Offener Punkt – `_CONSOLE`-Schlüssel:** Stand 19.09.2026 ist der Schlüssel weder öffentlich bekannt (Internet-/GitHub-Recherche: alle Werkzeuge entschlüsseln nur die Videos), noch erraten (~60 Kandidaten inkl. VIN und Tresorpasswort gegen die Header-Signatur geprüft), noch abfangbar (er entsteht und bleibt in der Fahrzeug-Konsole, fließt über USB/BLE/Cloud nie). Der einzige realistische Weg wäre eine künftige Community-Extraktion aus der Firmware – der Passwort-Weg ist im Entschlüsselungsmodul schon nachgebaut, es fehlt allein die Passphrase. Bis dahin bleibt es bei der Ersatz-`event.json`. Kandidat für später: den Grund aus unserer eigenen Telemetrie erschließen (Beschleunigungsspitze → `sentry_aware_accel_…`, Ordnertyp → Sentry vs. manuell).
 
+## Video-Verschlüsselung im Auto: an oder aus?
+
+Seit Firmware **2026.20** verschlüsselt das Auto Dashcam-/Sentry-Aufnahmen standardmäßig auf dem Datenträger. Abschaltbar unter **Fahrzeug → Sicherheit → „Dashcam-Aufnahmen verschlüsseln“**. Die Entscheidung ist ein echter Kompromiss – hier die Abwägung speziell für diesen Aufbau (Hub + NAS + externer Viewer).
+
+| Aspekt | Verschlüsselung **AN** (Standard) | Verschlüsselung **AUS** |
+|---|---|---|
+| **Videos bei Diebstahl von Stick/Pi** | Auf der SSD unlesbar – der Schlüssel liegt **nicht** auf dem Pi, sondern kommt von Tesla. Stärkster Schutz, den es hier gibt. | Klartext-MP4 – wer den Datenträger hat, sieht alles (Personen, Kennzeichen, Wohnort …). Datenschutz-Risiko. |
+| **`event.json` / `thumb.png`** | **Ebenfalls verschlüsselt, aber mit dem Konsolen-Schlüssel `_CONSOLE`** – außerhalb des Autos **nicht** entschlüsselbar (siehe Abschnitt oben). Auslösegrund und Original-Vorschaubild sind für jeden externen Viewer verloren; der Hub liefert nur eine Ersatz-`event.json`. | Klartext – **voller Auslösegrund, Original-Vorschaubild, Position**. Te_FITI & Co. zeigen alles. |
+| **Wiedergabe / Aufwand** | Clips brauchen Schlüsselabruf + Entschlüsselung (Hub oder dashcam.tesla.com). Braucht ein **Tesla-Konto-Token** und beim Holen neuer Schlüssel Internet. | Clips sind sofort abspielbar, überall, ohne Konto, ohne Online-Abruf. Einfachere Kette. |
+| **Snapshot-Risiko** | Ein Schnappschuss mitten im Schreiben kann einen **dauerhaft unentschlüsselbaren** Clip erzeugen (leerer Schlüsselblock). teslausb fängt das ab (`make_snapshot.sh`), es bleibt aber eine Fehlerquelle. | Entfällt – ein halb geschriebener MP4 ist höchstens kurz, nie „für immer kaputt“. |
+| **Pi-Last (1 GB RAM)** | Entschlüsseln kostet CPU/RAM; auf dem kleinen Pi historisch eine OOM-Quelle (abgesichert, aber real). | Keine Entschlüsselung nötig. |
+| **Langzeit-Abhängigkeit** | Alte Clips brauchen weiter Teslas Schlüsseldienst. Ändert/entfernt Tesla ihn, könnten sie unlesbar werden. | Keine Abhängigkeit von Tesla. |
+
+**Für diesen Aufbau wichtig – die Verschlüsselung schützt nur die Pi-SSD, nicht das Ganze:**
+
+- Das **NAS** hält die Aufnahmen ohnehin **entschlüsselt** (`decrypted/`), und bei aktiven Rohschlüsseln (`NAS_RAW_KEYS`) zusätzlich die Klartext-Schlüssel daneben. Der „unlesbar bei Diebstahl“-Vorteil gilt also für den Pi, **nicht** fürs NAS – dort ist der Inhalt so oder so offen.
+- Der Hub braucht bei aktiver Verschlüsselung den **Tesla-Konto-Token** (im Tresor) und muss Schlüssel online holen. Ohne das bleiben neue Clips unlesbar.
+- Der einzige *inhaltliche* Verlust durch die Verschlüsselung ist die **`event.json`** (Auslösegrund + Vorschaubild) – der Rest lässt sich mit Schlüssel voll wiederherstellen.
+
+**Faustregel:**
+
+- **Verschlüsselung AN lassen**, wenn dein Hauptszenario „Pi/Stick wird aus dem Auto entwendet“ ist und dir der Schutz der Videoinhalte auf dem Gerät wichtiger ist als vollständige Event-Metadaten. Den Verlust der `event.json` mildert die Ersatzdatei ab.
+- **Verschlüsselung AUS**, wenn du auf **vollständige Ereignisdaten** (Grund, Vorschaubild) Wert legst, den Ablauf einfach halten willst und der Diebstahlschutz stattdessen woanders sitzt – z. B. der Pi steckt verdeckt/gesichert, und das NAS steht im gesicherten Heimnetz. Dann arbeitet die ganze Kette ohne Tesla-Konto, ohne Online-Abruf und ohne den Snapshot-Fallstrick.
+
+Beides funktioniert mit dem Hub. Bei **AN** greifen Schlüsselabruf, Ersatz-`event.json` und die verschlüsselten Ableitungen; bei **AUS** ist alles Klartext und der Viewer zeigt native Ereignisdaten. (Quellen: [Not a Tesla App](https://www.notateslaapp.com/news/4225/tesla-enables-dashcam-clip-encryption-in-update-202620), [Drive Tesla Canada](https://driveteslacanada.ca/news/tesla-2026-20-dashcam-encryption-parental-controls/).)
+
 ## „Ist der Hub beim Auto?“ (Fahrzeug-Seite)
 
 Von der USB-Seite kann der Pi nicht erkennen, an welchem Auto er steckt — das Gadget weiß nur, dass *irgendein* Host die Laufwerke eingebunden hat. Eindeutig ist nur die BLE-Kopplung: `tesla-control` spricht genau die hinterlegte VIN an, authentifiziert mit dem Schlüssel, den dieses Fahrzeug akzeptiert hat. `presence.py` schickt deshalb alle 10 Minuten einen kurzen `ping` und zeigt das Ergebnis auf der Fahrzeug-Seite, im Ereignis-Log (nur bei Wechseln) und als HA-Sensor „Beim Auto (BLE)“.
