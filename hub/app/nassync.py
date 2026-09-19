@@ -55,7 +55,7 @@ Camera-clip-observing jobs, both driven by nas_sync_loop() in server.py:
     called every 60s from key_fetch_loop() in server.py, not
     nas_sync_loop(), since it needs no NAS configured at all.
 """
-import os, re, json, time, base64, secrets, shutil, datetime, subprocess, tempfile, threading, fcntl
+import os, re, json, time, base64, secrets, shutil, struct, datetime, subprocess, tempfile, threading, fcntl
 import hubconf
 import blackbox
 import diag
@@ -541,7 +541,9 @@ RAWKEYS_MNT = "/tmp/hub_nas_rawkeys"
 EVENTS_MNT = "/tmp/hub_nas_events"
 EVENT_FILES = ("event.json", "thumb.png")
 DECRYPTED = "decrypted"
-_events_cache = {"t": 0.0, "ok": None, "error": None, "copied": 0, "pending": 0}
+_ECRYPTFS_MAGIC = 0x3C81B7F5
+_EVENT_TS_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})")
+_events_cache = {"t": 0.0, "ok": None, "error": None, "copied": 0, "rebuilt": 0, "cleaned": 0}
 
 
 def events_status():
@@ -549,24 +551,87 @@ def events_status():
         return dict(_events_cache)
 
 
+def _is_ecryptfs(path):
+    """True if the file is an eCryptfs container (encrypted), False if plain,
+    None if it can't be read. The car encrypts event.json/thumb.png with an
+    in-console key (eCryptfs Tag-3 passphrase, key name "_CONSOLE") -- not the
+    per-clip cloud key we can fetch, so these can't be decrypted off the car.
+    See EVENT_JSON_ENCRYPTED_CLIPS_ISSUE.md."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    if len(head) < 16:
+        return False
+    m1, m2 = struct.unpack(">I", head[8:12])[0], struct.unpack(">I", head[12:16])[0]
+    return (m1 ^ m2) == _ECRYPTFS_MAGIC
+
+
+def _first_telemetry_point(folder):
+    """(lat, lon) from the first frame of any *.telemetry.json in the decrypted
+    event folder, or None. That file is the Hub's own decrypted telemetry, so
+    it needs no key here."""
+    try:
+        names = [n for n in os.listdir(folder) if n.endswith(".telemetry.json")]
+    except OSError:
+        return None
+    for nm in sorted(names):
+        try:
+            with open(os.path.join(folder, nm), encoding="utf-8") as f:
+                data = json.load(f)
+            for fr in data.get("frames") or []:
+                if fr.get("lat") is not None and fr.get("lon") is not None:
+                    return fr["lat"], fr["lon"]
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def _reconstructed_event(folder, event_name):
+    """A stand-in event.json for an event whose real one is a "_CONSOLE"
+    container we can't decrypt. Clearly marked reconstructed; carries what we
+    can actually know -- the timestamp from the folder name and, if a
+    decrypted telemetry file is present, an approximate location. The trigger
+    reason is genuinely unknown (only the car's file has it)."""
+    m = _EVENT_TS_RE.search(event_name)
+    ts = "%s-%s-%sT%s:%s:%s" % m.groups() if m else ""
+    ev = {"timestamp": ts, "city": "", "reason": "unbekannt (rekonstruiert)", "camera": "0",
+          "reconstructed": True, "reconstructed_by": "TeslaCam Hub",
+          "note": "Original event.json ist mit dem Konsolen-Schluessel des Autos verschluesselt "
+                  "und ausserhalb des Fahrzeugs nicht lesbar; dies ist ein Ersatz aus Ordnername "
+                  "und Telemetrie."}
+    loc = _first_telemetry_point(folder)
+    if loc:
+        ev["est_lat"], ev["est_lon"] = "%.6f" % loc[0], "%.6f" % loc[1]
+    return ev
+
+
 def mirror_event_files():
-    """Put event.json/thumb.png next to the decrypted clips as well.
+    """Make event metadata usable in the decrypted tree that a viewer indexes.
 
     Te_FITI decrypts TeslaCam/EncryptedClips/<folder>/*.mp4 into
-    decrypted/EncryptedClips/<folder>/ and (with delete_originals) removes
-    the encrypted originals afterwards -- but it doesn't take the event
-    metadata along, and nothing else does either. A viewer that indexes the
-    decrypted tree then shows no trigger reason, no highlighted segment and
-    no thumbnail for every encrypted event, which is what
-    EVENT_JSON_ENCRYPTED_CLIPS_ISSUE.md chased on the NAS side. Measured
-    2026-09-18: 110 of 110 event folders under EncryptedClips have both
-    files, 0 of 548 decrypted folders do -- nothing was ever lost, the two
-    files simply never travel.
+    decrypted/EncryptedClips/<folder>/ and (with delete_originals) drops the
+    encrypted originals -- but never carries event.json/thumb.png along. Two
+    cases, and they differ (EVENT_JSON_ENCRYPTED_CLIPS_ISSUE.md):
 
-    Copy only: never deletes, never overwrites, skips folders that already
-    have the file. Runs from nas_sync_loop like the key sidecars."""
+      - Pre-encryption clips: event.json/thumb.png are plain files. Copy them
+        across (never overwrite, never delete the source).
+      - Encrypted clips (firmware 2026.20+): both files are eCryptfs "_CONSOLE"
+        containers, encrypted with an in-console key we do NOT have (the
+        per-clip cloud key does not open them). They can't be decrypted off
+        the car, so copying the container only produces a file a viewer reads
+        as broken JSON. Instead write a clearly-marked reconstructed
+        event.json (timestamp + best-effort location); thumb.png can't be
+        rebuilt and is left absent.
+
+    Self-healing: an earlier version copied the raw containers into the
+    decrypted tree (250 files on 2026-09-18). Any event.json/thumb.png found
+    there that is itself an eCryptfs container is one of those -- remove it,
+    and for event.json drop the reconstructed stand-in in its place."""
     mnt = EVENTS_MNT
-    copied, pending, errors = 0, 0, []
+    copied = rebuilt = cleaned = 0
+    errors = []
     _op_lock.acquire()
     try:
         full = (hubconf.getval("SHARE_NAME") or "").strip("/")
@@ -582,7 +647,7 @@ def mirror_event_files():
             dec_root = os.path.join(mnt, DECRYPTED)
             if not os.path.isdir(dec_root):
                 with _guard:
-                    _events_cache.update(t=time.time(), ok=True, error=None, copied=0, pending=0)
+                    _events_cache.update(t=time.time(), ok=True, error=None, copied=0, rebuilt=0, cleaned=0)
                 return {"ok": True, "copied": 0, "skipped": "kein decrypted-Ordner auf dem NAS"}
             for group in ("SavedClips", "SentryClips", "TeslaTrackMode"):
                 gdir = os.path.join(enc_root, group)
@@ -599,28 +664,51 @@ def mirror_event_files():
                                 os.path.join(dec_root, group, event)):
                         if not os.path.isdir(dst):
                             continue
-                        for name in EVENT_FILES:
-                            s, d = os.path.join(src, name), os.path.join(dst, name)
-                            if not os.path.isfile(s) or os.path.isfile(d):
-                                continue
-                            try:
-                                tmp = d + ".tmp"
-                                shutil.copyfile(s, tmp)
-                                os.replace(tmp, d)
-                                copied += 1
-                            except OSError as e:
-                                pending += 1
-                                errors.append("%s/%s: %s" % (event, name, e))
+                        try:
+                            c, r, cl = _mirror_one(src, dst, event)
+                            copied += c; rebuilt += r; cleaned += cl
+                        except OSError as e:
+                            errors.append("%s: %s" % (event, e))
         finally:
             _umount(mnt)
     finally:
         _op_lock.release()
-    if copied:
-        print("[hub] event-Daten zu den entschlüsselten Clips kopiert: %d" % copied, flush=True)
+    if copied or rebuilt or cleaned:
+        print("[hub] event-Daten: %d kopiert, %d rekonstruiert, %d unbrauchbare Container entfernt"
+              % (copied, rebuilt, cleaned), flush=True)
     with _guard:
         _events_cache.update(t=time.time(), ok=not errors, error="; ".join(errors[:3]) or None,
-                             copied=copied, pending=pending)
-    return {"ok": not errors, "copied": copied, "errors": errors[:5]}
+                             copied=copied, rebuilt=rebuilt, cleaned=cleaned)
+    return {"ok": not errors, "copied": copied, "rebuilt": rebuilt, "cleaned": cleaned, "errors": errors[:5]}
+
+
+def _mirror_one(src, dst, event):
+    """One event folder. Returns (copied, rebuilt, cleaned)."""
+    copied = rebuilt = cleaned = 0
+    for name in EVENT_FILES:
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        # Clean up a container an earlier run wrongly copied here.
+        if os.path.isfile(d) and _is_ecryptfs(d):
+            os.remove(d)
+            cleaned += 1
+        src_enc = _is_ecryptfs(s) if os.path.isfile(s) else None
+        if src_enc is False:                         # plain source (pre-encryption clip)
+            if not os.path.isfile(d):
+                tmp = d + ".tmp"
+                shutil.copyfile(s, tmp)
+                os.replace(tmp, d)
+                copied += 1
+        elif name == "event.json" and (src_enc is True or src_enc is None):
+            # Encrypted (or gone) original -> a reconstructed stand-in, once.
+            if not os.path.isfile(d):
+                ev = _reconstructed_event(dst, event)
+                tmp = d + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(ev, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, d)
+                rebuilt += 1
+        # thumb.png for an encrypted clip: can't be rebuilt, leave it absent.
+    return copied, rebuilt, cleaned
 
 
 def _archived_with_key(mnt, keys, suffix):
