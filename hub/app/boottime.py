@@ -189,7 +189,7 @@ def collect():
             if bid == cur and not rec.get("logged") and "hub_s" in rec:
                 prev = [recs[b] for b in boots[:-1] if b in recs] if boots and boots[-1] == cur else []
                 tail = " – davor Stromausfall ohne Herunterfahren" if prev and prev[-1].get("clean_end") is False else ""
-                eventlog.log_event("power", "Pi gestartet: Laufwerke fürs Auto nach %s, WLAN nach %s, Hub nach %s%s"
+                eventlog.log_event("power", "Pi started: drives for the car after %s, Wi-Fi after %s, Hub after %s%s"
                                    % (_fmt(rec.get("drives_s")), _fmt(rec.get("wifi_s")), _fmt(rec.get("hub_s")), tail),
                                    **{k: rec[k] for k in ("drives_s", "wifi_s", "hub_s", "finished_s") if k in rec})
                 rec["logged"] = True

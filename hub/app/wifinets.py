@@ -40,12 +40,12 @@ def _load():
 
 def _validate(ssid, psk):
     if not ssid or len(ssid.encode("utf-8")) > 32:
-        raise ValueError("SSID fehlt oder ist länger als 32 Bytes")
+        raise ValueError("SSID missing or longer than 32 bytes")
     if any(c in ssid + psk for c in "\r\n\0"):
-        raise ValueError("SSID/Passwort enthält ungültige Zeichen")
+        raise ValueError("SSID/password contains invalid characters")
     hex64 = len(psk) == 64 and all(c in "0123456789abcdefABCDEF" for c in psk)
     if psk and not (8 <= len(psk) <= 63 or hex64):
-        raise ValueError("WLAN-Passwort muss 8–63 Zeichen lang sein (leer lassen für ein offenes Netz)")
+        raise ValueError("Wi-Fi password must be 8–63 characters long (leave empty for an open network)")
 
 
 def _esc(s):
@@ -133,7 +133,7 @@ def add(ssid, psk):
     (an empty password then keeps the stored one)."""
     ssid, psk = str(ssid or "").strip(), str(psk or "")
     if ssid and ssid == hubconf.getval("SSID"):
-        raise ValueError("Das ist das Heim-WLAN – das wird oben unter „Netzwerk“ eingestellt")
+        raise ValueError("This is the home Wi-Fi – set it above under \"Network\"")
     nets = _load()
     existing = next((n for n in nets if n["ssid"] == ssid), None)
     if existing and not psk:
@@ -142,7 +142,7 @@ def add(ssid, psk):
     if existing:
         existing["psk"] = psk
     elif len(nets) >= MAX_NETWORKS:
-        raise ValueError("Höchstens %d weitere WLANs" % MAX_NETWORKS)
+        raise ValueError("At most %d additional Wi-Fi networks" % MAX_NETWORKS)
     else:
         nets.append({"ssid": ssid, "psk": psk})
     return _apply(nets)
@@ -156,7 +156,7 @@ def move(ssid, delta):
     nets = _load()
     i = next((k for k, n in enumerate(nets) if n["ssid"] == ssid), None)
     if i is None:
-        raise ValueError("Netz nicht gefunden")
+        raise ValueError("Network not found")
     j = max(0, min(len(nets) - 1, i + (1 if int(delta) > 0 else -1)))
     nets[i], nets[j] = nets[j], nets[i]
     return _apply(nets)

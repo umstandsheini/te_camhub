@@ -73,7 +73,7 @@ def _run(cmd, timeout):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=ENV)
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(cmd, 124, "", "Zeitüberschreitung")
+        return subprocess.CompletedProcess(cmd, 124, "", "Timeout")
     except OSError as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
@@ -97,7 +97,7 @@ def _last_line(r):
 def check():
     with _guard:
         if _state["running"]:
-            return {"ok": False, "error": "Update läuft gerade", "status": status_unlocked()}
+            return {"ok": False, "error": "Update currently running", "status": status_unlocked()}
     try:
         return _check()
     finally:
@@ -115,12 +115,12 @@ def _check():
     r = _run(["apt-get", "-q", "update"] + opts, 300)
     if r.returncode != 0:
         with _guard:
-            _state.update(checked=time.time(), check_error="Paketlisten nicht ladbar: " + _last_line(r))
+            _state.update(checked=time.time(), check_error="Package lists could not be loaded: " + _last_line(r))
         return {"ok": False, "error": _state["check_error"], "status": status()}
     s = _run(["apt-get", "-s", "-q", "upgrade", "--with-new-pkgs"] + opts, 180)
     if s.returncode != 0:
         with _guard:
-            _state.update(checked=time.time(), check_error="Simulation fehlgeschlagen: " + _last_line(s))
+            _state.update(checked=time.time(), check_error="Simulation failed: " + _last_line(s))
         return {"ok": False, "error": _state["check_error"], "status": status()}
     audit = _run(["dpkg", "--audit"], 30)
     with _guard:
@@ -143,15 +143,15 @@ def _ssid():
 def start_upgrade():
     home = hubconf.getval("SSID")
     if not home or _ssid() != home:
-        return {"ok": False, "error": "Nur im Heim-WLAN (%s) – unterwegs fehlt stabiler Strom, und der Download "
-                                      "liefe über mobile Daten." % (home or "nicht konfiguriert")}
+        return {"ok": False, "error": "Only on the home Wi-Fi (%s) – on the road there is no stable power, and the download "
+                                      "would use mobile data." % (home or "not configured")}
     free = shutil.disk_usage("/").free
     if free < MIN_ROOT_FREE_MB * 1048576:
-        return {"ok": False, "error": "Zu wenig Platz auf der Systempartition (%d MB frei, mindestens %d MB nötig)"
+        return {"ok": False, "error": "Not enough space on the system partition (%d MB free, at least %d MB needed)"
                                       % (free // 1048576, MIN_ROOT_FREE_MB)}
     with _guard:
         if _state["running"]:
-            return {"ok": False, "error": "Update läuft bereits"}
+            return {"ok": False, "error": "Update already running"}
         _state.update(running=True, phase="startet", started=time.time(), finished=None, ok=None,
                       error=None, reboot_recommended=False, tail=[])
     open(RUNNING_MARKER, "w").close()
@@ -204,34 +204,34 @@ def _upgrade_worker():
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise _Abort("Archivierung läuft gerade – später erneut versuchen")
+            raise _Abort("Archiving is currently running – try again later")
         _out("")
         _out("##### OS-Update %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
-        _phase("Systempartition beschreibbar machen")
+        _phase("making system partition writable")
         for mnt in ("/", "/boot/firmware"):
             if _is_mountpoint(mnt) and _is_ro(mnt):
                 if _stream(["mount", mnt, "-o", "remount,rw"]) != 0:
-                    raise _Abort("%s ließ sich nicht beschreibbar machen" % mnt)
+                    raise _Abort("%s could not be made writable" % mnt)
                 remounted.append(mnt)
-        _phase("unterbrochene Installation reparieren (falls vorhanden)")
+        _phase("repair interrupted installation (if any)")
         if _stream(["dpkg", "--configure", "-a"]) != 0:
-            raise _Abort("dpkg --configure -a fehlgeschlagen – siehe Protokoll")
+            raise _Abort("dpkg --configure -a failed – see log")
         _phase("Paketlisten laden")
         if _stream(["apt-get", "-q", "update", "-o", "Acquire::Retries=3"]) != 0:
-            raise _Abort("Paketlisten nicht ladbar")
+            raise _Abort("Package lists could not be loaded")
         sim = _run(["apt-get", "-s", "-q", "upgrade", "--with-new-pkgs"], 180)
         pkgs = _parse_sim(sim.stdout or "")
         reboot = any(REBOOT_PKGS.match(u["pkg"]) for u in pkgs)
-        _phase("%d Pakete installieren" % len(pkgs))
+        _phase("installing %d packages" % len(pkgs))
         if _stream(["apt-get", "-y", "-q"] + UPGRADE_OPTS + ["upgrade", "--with-new-pkgs"]) != 0:
-            raise _Abort("apt-get upgrade fehlgeschlagen – siehe Protokoll")
-        _phase("aufräumen")
+            raise _Abort("apt-get upgrade failed – see log")
+        _phase("cleaning up")
         _stream(["apt-get", "clean"])
         ok = True
     except _Abort as e:
         err = str(e)
     except Exception as e:
-        err = "Interner Fehler: %s" % str(e)[:200]
+        err = "Internal error: %s" % str(e)[:200]
     finally:
         os.sync()
         for mnt in reversed(remounted):
@@ -239,7 +239,7 @@ def _upgrade_worker():
                 # Something upgraded still holds a deleted file open for
                 # writing; a reboot remounts cleanly ro anyway.
                 reboot = True
-                _out("%s bleibt bis zum Neustart beschreibbar" % mnt)
+                _out("%s stays writable until reboot" % mnt)
         os.close(fd)
         try:
             os.remove(RUNNING_MARKER)

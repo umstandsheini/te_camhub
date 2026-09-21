@@ -94,7 +94,7 @@ def start(hours=None):
     _save({"active": True, "until": until, "last_nudge": now if r.get("ok") else 0})
     if not r.get("ok"):
         return {"ok": True, "until": until, "hours": hours,
-                "warning": r.get("detail") or r.get("error") or "Erster Weck-Befehl fehlgeschlagen -- wird automatisch wiederholt"}
+                "warning": r.get("detail") or r.get("error") or "First wake command failed -- retrying automatically"}
     return {"ok": True, "until": until, "hours": hours}
 
 

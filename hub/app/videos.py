@@ -63,9 +63,9 @@ def status(name):
     try:
         full = _safe(name)
     except ValueError:
-        return {"state": "error", "error": "ungültiger Pfad"}
+        return {"state": "error", "error": "invalid path"}
     if not os.path.isfile(full):
-        return {"state": "error", "error": "Datei nicht gefunden"}
+        return {"state": "error", "error": "File not found"}
     return {"state": "done" if _is_ready(name) else "idle"}
 
 
@@ -74,7 +74,7 @@ def prepare(name):
     MP4 cached under .hub_cache/. Returns immediately -- poll status()."""
     full = _safe(name)
     if not os.path.isfile(full):
-        return {"ok": False, "error": "Datei nicht gefunden"}
+        return {"ok": False, "error": "File not found"}
     if _is_ready(name):
         return {"ok": True, "state": "done"}
     with _guard:
@@ -112,7 +112,7 @@ def _prepare_worker(name, full):
                  "-f", "mp4", tmp],
                 capture_output=True, text=True, timeout=10800)
             if r.returncode != 0:
-                raise RuntimeError((r.stderr or "ffmpeg fehlgeschlagen").strip()[-300:])
+                raise RuntimeError((r.stderr or "ffmpeg failed").strip()[-300:])
         os.replace(tmp, dest)
         with _guard:
             _jobs[name] = {"state": "done", "error": None}

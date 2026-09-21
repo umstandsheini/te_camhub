@@ -464,9 +464,9 @@ def to_gpx(trip_id):
     points = _read_points(trip_id)
     try:
         dt = datetime.datetime.strptime(trip_id, "%Y-%m-%dT%H-%M-%S")
-        name = f"Fahrt {dt.strftime('%Y-%m-%d %H:%M')}"
+        name = f"Trip {dt.strftime('%Y-%m-%d %H:%M')}"
     except ValueError:
-        name = f"Fahrt {trip_id}"
+        name = f"Trip {trip_id}"
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<gpx version="1.1" creator="TeslaCam Hub" '

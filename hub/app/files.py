@@ -134,7 +134,7 @@ def with_drives_detached(fn, lock_wait=60):
                 break
             except BlockingIOError:
                 if time.time() > deadline:
-                    raise RuntimeError("Archivierung läuft gerade – bitte in ein paar Minuten erneut versuchen")
+                    raise RuntimeError("Archiving is currently running – please try again in a few minutes")
                 time.sleep(2)
         was_bound = _gadget_bound()
         if was_bound:
@@ -146,7 +146,7 @@ def with_drives_detached(fn, lock_wait=60):
             if was_bound:
                 r = subprocess.run(["/root/bin/enable_gadget.sh"], capture_output=True, text=True, timeout=120)
         if was_bound and r.returncode != 0:
-            raise RuntimeError("Geschrieben, aber die USB-Laufwerke ließen sich nicht wieder verbinden: "
+            raise RuntimeError("Written, but the USB drives could not be reconnected: "
                                + ((r.stdout or "") + (r.stderr or "")).strip()[-200:])
         return result
     finally:
@@ -165,14 +165,14 @@ def set_lockchime(rel):
     with_drives_detached()."""
     rel_norm = (rel or "").replace("\\", "/").lstrip("/")
     if not rel_norm.startswith("Boombox/"):
-        raise ValueError("Quelle muss im Boombox-Ordner liegen")
+        raise ValueError("Source must be in the Boombox folder")
     if not rel_norm.lower().endswith(".wav"):
-        raise ValueError("nur .wav-Dateien sind als LockChime zulässig")
+        raise ValueError("only .wav files are allowed as LockChime")
     full = _safe(rel)
     if not os.path.isfile(full):
-        raise ValueError("Datei nicht gefunden")
+        raise ValueError("File not found")
     if os.path.getsize(full) > LOCKCHIME_MAX_BYTES:
-        raise ValueError("Datei zu groß (max. 1 MB für LockChime.wav)")
+        raise ValueError("File too large (max. 1 MB for LockChime.wav)")
     dest = _safe("Boombox/LockChime.wav")
     tmp = dest + ".tmp"
 

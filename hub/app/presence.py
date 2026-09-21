@@ -91,7 +91,7 @@ def check():
     """One BLE ping against the paired car. Returns the new status."""
     if not configured():
         with _guard:
-            _state.update(checked=time.time(), error="Kein gekoppelter BLE-Schlüssel/keine VIN hinterlegt")
+            _state.update(checked=time.time(), error="No paired BLE key / no VIN configured")
         _save()
         return status()
     r = diag.ble_read(KEY_NAME, "ping")
@@ -105,7 +105,7 @@ def check():
                 _state["since"] = now
         else:
             _state["fails"] += 1
-            _state["error"] = (r.get("error") or "keine Antwort")[:200]
+            _state["error"] = (r.get("error") or "no answer")[:200]
             # One failed ping means little: the car may be asleep or the
             # connection slot was busy. Only a run of them flips the state.
             if _state["fails"] >= FAIL_GRACE and was is not False:
@@ -116,10 +116,10 @@ def check():
     _save()
     if new != was:
         if new:
-            eventlog.log_event("ble", "Fahrzeug per Bluetooth bestätigt: der Hub ist beim gekoppelten Auto")
+            eventlog.log_event("ble", "Vehicle confirmed over Bluetooth: the Hub is with the paired car")
         elif new is False:
-            eventlog.log_event("ble", "Fahrzeug per Bluetooth nicht mehr erreichbar "
-                                      "(Auto schläft, außer Reichweite – oder der Hub ist nicht mehr im Auto)")
+            eventlog.log_event("ble", "Vehicle no longer reachable over Bluetooth "
+                                      "(car asleep, out of range – or the Hub is no longer in the car)")
     return status()
 
 
@@ -168,4 +168,4 @@ def note_ble_success():
             changed = False
     _save()
     if changed:
-        eventlog.log_event("ble", "Fahrzeug per Bluetooth bestätigt: der Hub ist beim gekoppelten Auto")
+        eventlog.log_event("ble", "Vehicle confirmed over Bluetooth: the Hub is with the paired car")

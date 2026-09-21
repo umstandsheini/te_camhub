@@ -157,7 +157,7 @@ def _parse_frames(raw_text):
             values["ladekabel_limit_a"] = round(_bits_le(d, 0, 8) * 0.5, 1)  # CC_currentLimit
         elif cid == 0x219:  # VCSEC_TPMSData -- ein Frame pro Rad, Index in Bit0-1.
             # Location/Voltage/Temperature zeigten live nur Sentinel-Werte (0xFF =
-            # "noch kein Messwert") und keine bestätigte Rad-Zuordnung (kein VAL_ in
+            # "no reading yet") und keine bestätigte Rad-Zuordnung (kein VAL_ in
             # der DBC) -- nur Druck wird übernommen, Räder nummeriert statt benannt.
             idx = _bits_le(d, 0, 2)
             pressure_raw = _bits_le(d, 8, 8)
@@ -209,7 +209,7 @@ def _friendly_ble_error(msg):
     Ursache wie beim "keine CAN-Frames empfangen"-Fall unten, nur schon beim
     Verbindungsaufbau statt erst beim Lesen."""
     if "was not found" in msg.lower():
-        return "Dongle nicht gefunden -- steckt er im OBD-Port? Auto wach (Port hat nur dann Strom)?"
+        return "Dongle not found -- is it in the OBD port? Car awake (the port only has power then)?"
     return msg[:200]
 
 
@@ -233,7 +233,7 @@ def read(duration=5):
                 return {"ok": False, "error": _friendly_ble_error(msg)}
     values, seen_ids, unknown = _parse_frames(raw)
     if not seen_ids:
-        return {"ok": False, "error": "keine CAN-Frames empfangen (Dongle in Reichweite? Auto wach?)"}
+        return {"ok": False, "error": "no CAN frames received (dongle in range? car awake?)"}
     # Auf 80 begrenzen (typischerweise deutlich mehr unbekannte als bekannte
     # IDs pro Fenster) -- reicht zum Muster-Suchen, ohne die UI zu fluten.
     unknown_capped = dict(sorted(unknown.items())[:80])
@@ -288,7 +288,7 @@ def _monitor_loop():
                     _monitor_state["can_ids_seen"] = len(_monitor_seen_ids)
                     _monitor_state["error"] = None
                 else:
-                    _monitor_state["error"] = "keine CAN-Frames empfangen (Auto wach? Dongle in Reichweite?)"
+                    _monitor_state["error"] = "no CAN frames received (car awake? dongle in range?)"
             else:
                 _monitor_state["error"] = err or "Lesefehler"
         if _monitor_stop.wait(_MONITOR_PAUSE_S):
@@ -352,14 +352,14 @@ def monitor_status():
 # Botschaft (u. a. UI_alarmTriggerRequest, UI_autopilotPowerStateRequest) auf
 # 0 gelassen ("keine Anfrage") statt sie zu raten.
 RAW_ACTIONS = {
-    "glovebox_open": ("Handschuhfach öffnen", 0x3B3, "01000000"),
+    "glovebox_open": ("Open glovebox", 0x3B3, "01000000"),
 }
 
 
 def _hex_to_bytes(s):
     s = (s or "").strip().replace(" ", "")
     if not re.fullmatch(r"[0-9A-Fa-f]*", s) or len(s) % 2:
-        raise ValueError("ungültige Hex-Daten")
+        raise ValueError("invalid hex data")
     if len(s) // 2 > 8:
         raise ValueError("maximal 8 Datenbytes (klassischer CAN-Frame)")
     return bytes.fromhex(s)
@@ -393,9 +393,9 @@ async def _write_async(mac, can_id, data: bytes):
 
 def _write(can_id, data, confirm):
     if not confirm:
-        return {"ok": False, "error": "Bestätigung fehlt (\"Ich weiß, was ich tue\" nicht angeklickt)"}
+        return {"ok": False, "error": "Confirmation missing (\"I know what I'm doing\" not checked)"}
     if not (0 <= can_id <= 0x7FF):
-        return {"ok": False, "error": "CAN-ID außerhalb 11-Bit-Bereich (0-7FF)"}
+        return {"ok": False, "error": "CAN ID out of 11-bit range (0-7FF)"}
     mac = (hubconf.getval("CANBUS_MAC") or DEFAULT_MAC).strip()
     if not mac:
         return {"ok": False, "error": "keine Dongle-Adresse konfiguriert"}
@@ -427,11 +427,11 @@ def write_action(action_id, confirm=False):
 
 
 def write_raw(can_id_hex, data_hex, confirm=False):
-    """Sendet einen frei gewählten Frame (ID + bis zu 8 Datenbytes, je als Hex-Text)."""
+    """Sends an arbitrary frame (ID + up to 8 data bytes, each as hex text)."""
     try:
         can_id = int((can_id_hex or "").strip(), 16)
     except ValueError:
-        return {"ok": False, "error": "ungültige CAN-ID (Hex erwartet, z. B. 3B3)"}
+        return {"ok": False, "error": "invalid CAN ID (hex expected, e.g. 3B3)"}
     try:
         data = _hex_to_bytes(data_hex)
     except ValueError as e:

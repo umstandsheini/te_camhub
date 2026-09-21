@@ -40,18 +40,18 @@ DEVICE_INFO = {
 
 # object_id -> (component, name, device_class, unit, icon)
 SENSORS = {
-    "clips":     ("sensor", "Aufnahmen gesamt", None, None, "mdi:filmstrip"),
-    "encrypted": ("sensor", "Verschlüsselte Aufnahmen", None, None, "mdi:lock"),
-    "nas_percent": ("sensor", "NAS-Archivierung", None, "%", "mdi:cloud-upload"),
-    "temp":      ("sensor", "Pi-Temperatur", "temperature", "°C", None),
-    "wifi_ssid": ("sensor", "WLAN", None, None, "mdi:wifi"),
-    "usb_connected": ("binary_sensor", "USB am Auto", "connectivity", None, None),
+    "clips":     ("sensor", "Recordings total", None, None, "mdi:filmstrip"),
+    "encrypted": ("sensor", "Encrypted recordings", None, None, "mdi:lock"),
+    "nas_percent": ("sensor", "NAS archiving", None, "%", "mdi:cloud-upload"),
+    "temp":      ("sensor", "Pi temperature", "temperature", "°C", None),
+    "wifi_ssid": ("sensor", "Wi-Fi", None, None, "mdi:wifi"),
+    "usb_connected": ("binary_sensor", "USB at the car", "connectivity", None, None),
     # presence.py: the paired car answered over BLE, so the Hub is next to it
-    "in_car": ("binary_sensor", "Beim Auto (BLE)", "presence", None, "mdi:car-connected"),
-    "vault_unlocked": ("binary_sensor", "Tresor entsperrt", "lock", None, None),
+    "in_car": ("binary_sensor", "At the car (BLE)", "presence", None, "mdi:car-connected"),
+    "vault_unlocked": ("binary_sensor", "Vault unlocked", "lock", None, None),
     # this boot's timing (boottime.py): seconds from power-on
-    "boot_drives": ("sensor", "Start: Laufwerke bereit", "duration", "s", "mdi:timer-outline"),
-    "boot_hub":    ("sensor", "Start: Hub bereit", "duration", "s", "mdi:timer-outline"),
+    "boot_drives": ("sensor", "Boot: drives ready", "duration", "s", "mdi:timer-outline"),
+    "boot_hub":    ("sensor", "Boot: Hub ready", "duration", "s", "mdi:timer-outline"),
 }
 
 # ---------------------------------------------------------------------------
@@ -60,26 +60,26 @@ SENSORS = {
 # are compared against BOOL_TRUE below instead of copied as text.
 # read_id -> (component, name, primary_field, icon, unit, device_class)
 BLE_READ_ENTITIES = {
-    "closures": ("binary_sensor", "Verriegelt", "locked", "mdi:car-door-lock", None, "lock"),
-    "body_controller": ("binary_sensor", "Schläft", "vehicleSleepStatus", "mdi:sleep", None, None),
-    "charge": ("sensor", "Ladezustand", "chargingState", "mdi:ev-station", None, None),
-    "tire_pressure": ("sensor", "Reifendruck", "timestamp", "mdi:car-tire-alert", None, "timestamp"),
-    "climate": ("sensor", "Innentemperatur", "insideTempCelsius", "mdi:thermometer", "°C", None),
+    "closures": ("binary_sensor", "Locked", "locked", "mdi:car-door-lock", None, "lock"),
+    "body_controller": ("binary_sensor", "Sleeping", "vehicleSleepStatus", "mdi:sleep", None, None),
+    "charge": ("sensor", "Charge state", "chargingState", "mdi:ev-station", None, None),
+    "tire_pressure": ("sensor", "Tire pressure", "timestamp", "mdi:car-tire-alert", None, "timestamp"),
+    "climate": ("sensor", "Inside temperature", "insideTempCelsius", "mdi:thermometer", "°C", None),
     # "state location" (standalone) has no locationName field, unlike the
     # locationState nested inside "state drive" -- use latitude as the
     # headline value, longitude/heading/accuracy/... land in attributes.
-    "location": ("sensor", "Standort", "latitude", "mdi:map-marker", "°", None),
+    "location": ("sensor", "Location", "latitude", "mdi:map-marker", "°", None),
     # "state drive" uniquely returns two wrapper keys (driveState +
     # locationState) instead of one, so _flatten_state prefixes its fields.
-    "drive": ("sensor", "Schaltstellung", "driveState.shiftState", "mdi:car-shift-pattern", None, None),
-    "media": ("sensor", "Medienstatus", None, "mdi:play-circle", None, None),
-    "media_detail": ("sensor", "Medien-Details", None, "mdi:music-note", None, None),
-    "charge_schedule": ("sensor", "Lade-Zeitplan", None, "mdi:calendar-clock", None, None),
-    "precondition_schedule": ("sensor", "Vorklimatisierungs-Zeitplan", None, "mdi:calendar-clock", None, None),
-    "software_update": ("sensor", "Software-Update-Status", "status", "mdi:update", None, None),
-    "parental_controls": ("sensor", "Kindersicherung", None, "mdi:account-child", None, None),
-    "list_keys": ("sensor", "Anzahl Schlüssel", "anzahl_schluessel", "mdi:key-chain", None, None),
-    "ping": ("sensor", "Erreichbarkeit", "erreichbar", "mdi:bluetooth-connect", None, None),
+    "drive": ("sensor", "Gear position", "driveState.shiftState", "mdi:car-shift-pattern", None, None),
+    "media": ("sensor", "Media status", None, "mdi:play-circle", None, None),
+    "media_detail": ("sensor", "Media details", None, "mdi:music-note", None, None),
+    "charge_schedule": ("sensor", "Charge schedule", None, "mdi:calendar-clock", None, None),
+    "precondition_schedule": ("sensor", "Preconditioning schedule", None, "mdi:calendar-clock", None, None),
+    "software_update": ("sensor", "Software update status", "status", "mdi:update", None, None),
+    "parental_controls": ("sensor", "Parental controls", None, "mdi:account-child", None, None),
+    "list_keys": ("sensor", "Number of keys", "anzahl_schluessel", "mdi:key-chain", None, None),
+    "ping": ("sensor", "Reachability", "erreichbar", "mdi:bluetooth-connect", None, None),
 }
 _BOOL_TRUE = {"true", "1", "yes", "vehicle_sleep_status_asleep"}
 
@@ -87,18 +87,18 @@ _BOOL_TRUE = {"true", "1", "yes", "vehicle_sleep_status_asleep"}
 # esphome-tesla-ble's switch.*_charger pattern) instead of two separate
 # stateless buttons.
 BLE_SWITCHES = {
-    "charging": ("Laden", "mdi:battery-charging", "charging_start", "charging_stop"),
-    "accessory_power": ("Zubehör-Stromversorgung", "mdi:power-plug", "keep_accessory_power_on", "keep_accessory_power_off"),
+    "charging": ("Charging", "mdi:battery-charging", "charging_start", "charging_stop"),
+    "accessory_power": ("Accessory power", "mdi:power-plug", "keep_accessory_power_on", "keep_accessory_power_off"),
 }
 # action_id -> (label, min, max, step, unit)
 BLE_NUMBERS = {
-    "charging_set_limit": ("Ladegrenze", 50, 100, 1, "%"),
-    "charging_set_amps": ("Ladestrom", 5, 32, 1, "A"),
+    "charging_set_limit": ("Charge limit", 50, 100, 1, "%"),
+    "charging_set_amps": ("Charge current", 5, 32, 1, "A"),
 }
 # action_id -> label
 BLE_BUTTONS = {
-    "wake": "Auto aufwecken",
-    "charging_schedule_cancel": "Lade-Zeitplan abbrechen",
+    "wake": "Wake the car",
+    "charging_schedule_cancel": "Cancel charge schedule",
 }
 
 _lock = threading.Lock()

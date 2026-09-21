@@ -71,7 +71,7 @@ def _decrypt_one(src, dst, fek, make_room=None):
             make_room(os.path.getsize(src))
         avail = _mem_available_mb()
         if avail is not None and avail < DECRYPT_MIN_AVAIL_MB:
-            raise MemoryError(f"nur {avail} MB RAM frei – Entschlüsseln übersprungen")
+            raise MemoryError(f"only {avail} MB RAM free – decryption skipped")
         return pipeline.decrypt_and_cache(src, dst, fek)
 
 

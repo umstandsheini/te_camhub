@@ -147,12 +147,12 @@ def check():
         with _http(API % res["repo"]) as r:
             res["latest"] = parse_release(json.load(r))
         if not res["latest"]["tarball"] or not res["latest"]["sha256"]:
-            res["error"] = "Release %s enthält kein Installationspaket" % res["latest"]["tag"]
+            res["error"] = "Release %s contains no installation package" % res["latest"]["tag"]
     except urllib.error.HTTPError as e:
-        res["error"] = ("Noch keine Veröffentlichung auf GitHub" if e.code == 404
-                        else "GitHub antwortet mit Fehler %d" % e.code)
+        res["error"] = ("No release on GitHub yet" if e.code == 404
+                        else "GitHub responded with error %d" % e.code)
     except Exception as e:
-        res["error"] = "GitHub nicht erreichbar: %s" % str(e)[:150]
+        res["error"] = "GitHub not reachable: %s" % str(e)[:150]
     _write_json(_path(CHECK_FILE), res)
     return status()
 
@@ -218,24 +218,24 @@ def _home_wifi():
 def start_update():
     st = status()
     if st["running"]:
-        return {"ok": False, "error": "Update läuft bereits"}
+        return {"ok": False, "error": "Update already running"}
     if osupdate.running():
-        return {"ok": False, "error": "OS-Update läuft gerade – bitte warten, bis es fertig ist"}
+        return {"ok": False, "error": "OS update is currently running – please wait until it finishes"}
     if not st["available"]:
-        return {"ok": False, "error": "Kein neueres Update bekannt – zuerst „Nach Updates suchen“"}
+        return {"ok": False, "error": "No newer update known – run \"Check for updates\" first"}
     home_ok, home = _home_wifi()
     if not home_ok:
-        return {"ok": False, "error": "Nur im Heim-WLAN (%s) – unterwegs fehlt stabiler Strom, und der Download "
-                                      "liefe über mobile Daten." % (home or "nicht konfiguriert")}
+        return {"ok": False, "error": "Only on the home Wi-Fi (%s) – on the road there is no stable power, and the download "
+                                      "would use mobile data." % (home or "not configured")}
     try:
         free = shutil.disk_usage(os.path.dirname(BACKUP_DIR.rstrip("/"))).free
     except OSError:
         free = 0
     if free < MIN_FREE_MB * 1048576:
-        return {"ok": False, "error": "Zu wenig Platz für Sicherung und Download (mindestens %d MB)" % MIN_FREE_MB}
+        return {"ok": False, "error": "Not enough space for backup and download (at least %d MB)" % MIN_FREE_MB}
     with _guard:
         if running():
-            return {"ok": False, "error": "Update läuft bereits"}
+            return {"ok": False, "error": "Update already running"}
         open(RUNNING_MARKER, "w").close()
     threading.Thread(target=_work, args=(st["latest"], st["installed"]), daemon=True).start()
     return {"ok": True}
@@ -253,15 +253,15 @@ def _work(rel, installed):
     _log("")
     _log("##### Hub-Update %s -> %s, %s" % (installed, rel["tag"], time.strftime("%Y-%m-%d %H:%M:%S")))
     try:
-        phase("Sicherung")
+        phase("Backup")
         run["backup"] = make_backup(installed)
         phase("Download")
         src = fetch_release(rel)
-        phase("Installation startet")
+        phase("Installation starting")
         _launch(src, run["backup"], rel["tag"])
     except Exception as e:
         # Nothing was installed yet: report and give the marker back.
-        run.update(phase="fehlgeschlagen", ok=False, error=str(e)[:300], finished=time.time())
+        run.update(phase="failed", ok=False, error=str(e)[:300], finished=time.time())
         _write_json(_path(RUN_FILE), run)
         _log("##### Ergebnis: %s" % run["error"])
         try:
@@ -285,7 +285,7 @@ def make_backup(installed):
     for pattern in BACKUP_PATHS:
         paths += sorted(os.path.relpath(p, ROOT) for p in glob.glob(os.path.join(ROOT, pattern)))
     if not paths:
-        raise RuntimeError("Sicherung fehlgeschlagen: nichts zu sichern gefunden")
+        raise RuntimeError("Backup failed: nothing to back up found")
     os.close(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
     cmd = ["tar", "-czf", tmp, "-C", ROOT] + ["--exclude=" + e for e in BACKUP_EXCLUDES] + paths
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
@@ -295,7 +295,7 @@ def make_backup(installed):
         except OSError:
             pass
         lines = [l for l in (r.stderr or "").splitlines() if l.strip()]
-        raise RuntimeError("Sicherung fehlgeschlagen: %s" % (lines[-1] if lines else "tar rc=%d" % r.returncode)[:200])
+        raise RuntimeError("Backup failed: %s" % (lines[-1] if lines else "tar rc=%d" % r.returncode)[:200])
     os.chmod(tmp, 0o600)
     os.replace(tmp, final)
     for old in _backup_files()[KEEP_BACKUPS:]:
@@ -303,7 +303,7 @@ def make_backup(installed):
             os.remove(old)
         except OSError:
             pass
-    _log("Sicherung: %s (%.1f MB)" % (final, os.path.getsize(final) / 1048576))
+    _log("Backup: %s (%.1f MB)" % (final, os.path.getsize(final) / 1048576))
     return final
 
 
@@ -316,7 +316,7 @@ def _download(url, dest):
                 break
             size += len(chunk)
             if size > MAX_DOWNLOAD:
-                raise RuntimeError("Download zu groß")
+                raise RuntimeError("Download too large")
             f.write(chunk)
     return size
 
@@ -352,13 +352,13 @@ def fetch_release(rel):
     with open(shafile, encoding="utf-8", errors="replace") as f:
         want = (f.read().split() or [""])[0].lower()
     if not re.fullmatch(r"[0-9a-f]{64}", want) or _sha256(tgz) != want:
-        raise RuntimeError("Prüfsumme stimmt nicht – Download beschädigt")
-    _log("Download: %s (%.1f MB), SHA-256 geprüft" % (rel["tarball"], size / 1048576))
+        raise RuntimeError("Checksum mismatch – download corrupted")
+    _log("Download: %s (%.1f MB), SHA-256 verified" % (rel["tarball"], size / 1048576))
     _safe_extract(tgz, os.path.join(WORK_DIR, "src"))
     src = os.path.join(WORK_DIR, "src", "te_camhub")
     for need in ("VERSION", "hub/install.sh", "hub/hub-update.sh", "hub/app/server.py"):
         if not os.path.isfile(os.path.join(src, need)):
-            raise RuntimeError("Paket unvollständig: %s fehlt" % need)
+            raise RuntimeError("Package incomplete: %s missing" % need)
     with open(os.path.join(src, "VERSION"), encoding="utf-8") as f:
         version = f.read().strip()
     if version != rel["tag"]:
@@ -368,7 +368,7 @@ def fetch_release(rel):
             with open(py, "rb") as f:
                 compile(f.read(), py, "exec")
         except (SyntaxError, ValueError) as e:
-            raise RuntimeError("Paket passt nicht zu diesem Pi: %s lässt sich nicht übersetzen (%s)"
+            raise RuntimeError("Package does not match this Pi: %s does not compile (%s)"
                                % (os.path.basename(py), str(e)[:100]))
     return src
 
@@ -385,10 +385,10 @@ def _launch(src, backup, tag):
         os.chmod(RUNNER_COPY, 0o755)
         runner = RUNNER_COPY
     except OSError as e:
-        _log("Kopie nach %s nicht moeglich (%s) -- starte direkt von %s" % (RUNNER_COPY, e, runner))
+        _log("Copy to %s not possible (%s) -- starting directly from %s" % (RUNNER_COPY, e, runner))
     subprocess.run(["systemctl", "reset-failed", UNIT], capture_output=True)
     r = subprocess.run(["systemd-run", "--unit=" + UNIT, "--collect", "/bin/bash", runner, src, backup, tag],
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
-        raise RuntimeError("Installation ließ sich nicht starten: %s" % (r.stderr or "").strip()[:200])
-    _log("Installation läuft in %s.service (%s)" % (UNIT, runner))
+        raise RuntimeError("Installation could not be started: %s" % (r.stderr or "").strip()[:200])
+    _log("Installation running in %s.service (%s)" % (UNIT, runner))

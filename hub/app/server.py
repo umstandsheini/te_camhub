@@ -154,12 +154,12 @@ def key_fetch_loop():
                     print(f"[hub] local key sidecars: {r['written']} neu geschrieben", flush=True)
                 sealed = VIEWER.seal_ram_telemetry()
                 if sealed:
-                    print(f"[hub] derived: {sealed} Fahrdaten-Dateien versiegelt", flush=True)
+                    print(f"[hub] derived: sealed {sealed} drive-data files", flush=True)
                 if blackbox.ensure_key():
-                    print("[hub] blackbox: Schlüsselpaar für die Fahrten erzeugt", flush=True)
+                    print("[hub] blackbox: generated key pair for the trips", flush=True)
                 moved = blackbox.migrate_plaintext()
                 if moved:
-                    print(f"[hub] blackbox: {moved} Klartext-Fahrten verschlüsselt", flush=True)
+                    print(f"[hub] blackbox: encrypted {moved} plaintext trips", flush=True)
             made = VIEWER.ensure_thumbnails()
             if made:
                 print(f"[hub] background thumbnails: {made} neu erzeugt", flush=True)
@@ -223,7 +223,7 @@ NAS_RETRY_DURING_HOLD_SEC = 120
 
 def _nas_step(errors, label, r):
     if isinstance(r, dict) and r.get("ok") is False:
-        detail = r.get("error") or "; ".join(r.get("errors") or []) or "Fehler"
+        detail = r.get("error") or "; ".join(r.get("errors") or []) or "error"
         errors.append(f"{label}: {detail}")
 
 
@@ -236,17 +236,17 @@ def nas_sync_loop():
         _nas_cycle["started"] = started
         errors = []
         try:
-            _nas_step(errors, "Abgleich", nassync.refresh_status(CFG["scan"]))
+            _nas_step(errors, "Refresh", nassync.refresh_status(CFG["scan"]))
             if VAULT.is_unlocked():
-                _nas_step(errors, "Schlüssel", nassync.push_key_sidecars(CFG["scan"], VAULT))
+                _nas_step(errors, "Keys", nassync.push_key_sidecars(CFG["scan"], VAULT))
                 if hubconf.getval("NAS_RAW_KEYS") == "true":
-                    _nas_step(errors, "Rohschlüssel", nassync.push_raw_keys(CFG["scan"], VAULT, CFG["state"]))
+                    _nas_step(errors, "Raw keys", nassync.push_raw_keys(CFG["scan"], VAULT, CFG["state"]))
             # event.json/thumb.png next to the decrypted clips -- no vault needed
             _nas_step(errors, "Event-Daten", nassync.mirror_event_files())
             if hubconf.getval("SYNC_ALL_CONTENT") == "true":
                 _nas_step(errors, "Medien", nassync.sync_media())
             if hubconf.getval("BLACKBOX_ENABLED") == "true" and hubconf.getval("SYNC_TRIPS_ENABLED") != "false":
-                _nas_step(errors, "Fahrten", nassync.sync_trips(_trip["trip_id"] if _trip["active"] else None))
+                _nas_step(errors, "Trips", nassync.sync_trips(_trip["trip_id"] if _trip["active"] else None))
         except Exception as e:
             print("[hub] nas sync:", e, flush=True)
             errors.append(str(e))
@@ -309,7 +309,7 @@ def ble_mqtt_loop():
                         last_err = r.get("error")
                 if reads:
                     if not any_ok and not _ble_mqtt_all_failing:
-                        eventlog.log_event("ble", f"BLE-Fahrzeugdaten aktuell nicht abrufbar: {last_err or 'unbekannter Fehler'}")
+                        eventlog.log_event("ble", f"BLE vehicle data currently unavailable: {last_err or 'unknown error'}")
                         _ble_mqtt_all_failing = True
                     elif any_ok and _ble_mqtt_all_failing:
                         eventlog.log_event("ble", "BLE-Fahrzeugdaten wieder abrufbar")
@@ -379,22 +379,22 @@ def _log_sync_hold_event(ev):
     kind = ev["event"]
     mins = int(ev.get("elapsed", 0) // 60)
     if kind == "started":
-        eventlog.log_event("keepawake", "Zuhause und NAS erreichbar: Auto bleibt wach, bis alles "
-                                        f"synchronisiert ist (max. {ev['max_min']} Min.)")
+        eventlog.log_event("keepawake", "Home and NAS reachable: car stays awake until everything "
+                                        f"is synced (max. {ev['max_min']} min)")
         return
     if kind in ("complete", "timeout", "disabled"):
         # The car is likely asleep -- and this Pi without power -- within
         # minutes now; flush first, same reasoning as the sleep guard.
         os.sync()
     if kind == "complete":
-        eventlog.log_event("keepawake", f"Sync vollständig nach {mins} Min.: Auto darf schlafen")
+        eventlog.log_event("keepawake", f"Sync complete after {mins} min: car may sleep")
     elif kind == "timeout":
-        eventlog.log_event("keepawake", f"Sync-Limit nach {mins} Min. erreicht, noch offen: "
-                                        f"{', '.join(ev.get('waiting_for') or [])}. Auto darf schlafen")
+        eventlog.log_event("keepawake", f"Sync limit reached after {mins} min, still open: "
+                                        f"{', '.join(ev.get('waiting_for') or [])}. Car may sleep")
     elif kind == "disabled":
-        eventlog.log_event("keepawake", "Wachhalten für den Sync abgeschaltet: Auto darf schlafen")
+        eventlog.log_event("keepawake", "Keep-awake for the sync turned off: car may sleep")
     elif kind == "left":
-        eventlog.log_event("keepawake", f"Heim-WLAN/NAS weg: Wachhalten für den Sync nach {mins} Min. beendet")
+        eventlog.log_event("keepawake", f"Home Wi-Fi/NAS gone: keep-awake for the sync ended after {mins} min")
 
 
 def keepawake_loop():
@@ -421,9 +421,9 @@ def keepawake_loop():
             if r is not None:
                 ev = r.get("event")
                 if ev == "expired":
-                    eventlog.log_event("keepawake", "Wach halten automatisch beendet (Zeit abgelaufen)")
+                    eventlog.log_event("keepawake", "Keep-awake stopped automatically (time expired)")
                 elif ev == "nudge_failed":
-                    eventlog.log_event("keepawake", f"Wake-Nudge schlägt fehl: {r.get('error') or 'unbekannter Fehler'}")
+                    eventlog.log_event("keepawake", f"Wake nudge failing: {r.get('error') or 'unknown error'}")
                 elif ev == "nudge_recovered":
                     eventlog.log_event("keepawake", "Wake-Nudge funktioniert wieder")
         except Exception as e:
@@ -443,13 +443,13 @@ def connectivity_log_loop():
             wifi = st.get("wifi_ssid") or None
             if wifi != last_wifi:
                 if wifi:
-                    eventlog.log_event("wifi", f"WLAN verbunden: {wifi}")
+                    eventlog.log_event("wifi", f"Wi-Fi connected: {wifi}")
                 elif last_wifi is not None:
-                    eventlog.log_event("wifi", f"WLAN getrennt (war: {last_wifi})")
+                    eventlog.log_event("wifi", f"Wi-Fi disconnected (was: {last_wifi})")
                 last_wifi = wifi
             usb = bool(st.get("gadget_active"))
             if last_usb is not None and usb != last_usb:
-                eventlog.log_event("usb", "USB-Gadget verbunden" if usb else "USB-Gadget getrennt")
+                eventlog.log_event("usb", "USB gadget connected" if usb else "USB gadget disconnected")
             last_usb = usb
         except Exception as e:
             print("[hub] connectivity log:", e, flush=True)
@@ -542,13 +542,13 @@ def _start_trip():
     trip_id = blackbox.start_trip(ts)
     _trip.update(active=True, trip_id=trip_id, start_ts=ts,
                   start_odometer=None, locked=None, asleep=None, charging=None)
-    eventlog.log_event("trip", "Fahrt gestartet")
+    eventlog.log_event("trip", "Drive started")
 
 
 def _end_trip():
     summary = blackbox.end_trip(_trip["trip_id"]) if _trip["trip_id"] else {}
     dist = summary.get("distance_km")
-    msg = "Fahrt beendet"
+    msg = "Drive ended"
     if dist is not None:
         msg += f" ({dist:.1f} km)"
     eventlog.log_event("trip", msg, **{k: v for k, v in summary.items() if k != "trip_id"})
@@ -589,13 +589,13 @@ def _trip_tick_active():
     if cl.get("ok"):
         locked = (cl.get("values") or {}).get("locked")
         if _trip["locked"] is not None and locked != _trip["locked"]:
-            eventlog.log_event("trip", "Verriegelt" if locked else "Entriegelt", während_fahrt=True)
+            eventlog.log_event("trip", "Locked" if locked else "Unlocked", during_trip=True)
         _trip["locked"] = locked
     ch = diag.ble_read("awake", "charge")
     if ch.get("ok"):
         charging = (ch.get("values") or {}).get("chargingState")
         if _trip["charging"] is not None and charging != _trip["charging"] and charging:
-            eventlog.log_event("trip", f"Ladezustand: {charging}", während_fahrt=True)
+            eventlog.log_event("trip", f"Charge state: {charging}", during_trip=True)
         _trip["charging"] = charging
 
 
@@ -660,7 +660,7 @@ def _sleep_guard_tick():
     now = time.time()
     if not idle_eligible:
         if _sleep_guard["prepared"]:
-            eventlog.log_event("power", "Aktivität erkannt, Sync-Vorbereitung zurückgesetzt")
+            eventlog.log_event("power", "Activity detected, sync preparation reset")
         _sleep_guard.update(idle_since=None, prepared=False)
         return
 
@@ -672,8 +672,8 @@ def _sleep_guard_tick():
         os.sync()
         if not _sleep_guard["prepared"]:
             mins = int((now - _sleep_guard["idle_since"]) / 60)
-            eventlog.log_event("power", f"Auto seit {mins} Min. verriegelt/geparkt -- "
-                                         "Pi-Zustand vorsorglich synchronisiert (möglicher Sleep bald)")
+            eventlog.log_event("power", f"Car locked/parked for {mins} min -- "
+                                         "Pi state synced preventively (possible sleep soon)")
             _sleep_guard["prepared"] = True
 
 
@@ -1022,7 +1022,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 gpx = blackbox.to_gpx(trip_id)
             except blackbox.Locked:
-                return self._json(423, {"error": "Tresor gesperrt"})
+                return self._json(423, {"error": "Vault locked"})
             except Exception as e:
                 print(f"[hub] GPX export failed for {trip_id}: {e}", flush=True)
                 return self._json(500, {"error": "export failed"})
@@ -1041,9 +1041,9 @@ class H(BaseHTTPRequestHandler):
         # Several endpoints below remount / themselves; their remount,ro in a
         # finally block would pull the root out from under a running dpkg.
         if osupdate.running() and not path.startswith("/api/os/") and path not in ("/api/login", "/api/logout"):
-            return self._json(409, {"ok": False, "error": "OS-Update läuft gerade – bitte warten, bis es fertig ist"})
+            return self._json(409, {"ok": False, "error": "OS update is currently running – please wait until it finishes"})
         if hubupdate.running() and not path.startswith("/api/hub/") and path not in ("/api/login", "/api/logout"):
-            return self._json(409, {"ok": False, "error": "Hub-Update läuft gerade – bitte warten, bis es fertig ist"})
+            return self._json(409, {"ok": False, "error": "Hub update is currently running – please wait until it finishes"})
 
         # public auth endpoints
         if path == "/api/setup":
@@ -1051,16 +1051,16 @@ class H(BaseHTTPRequestHandler):
                 return self._json(409, {"error": "vault exists"})
             pw = body.get("pass", "")
             if not pw:
-                return self._json(400, {"error": "leeres Passwort"})
+                return self._json(400, {"error": "empty password"})
             imp_k, imp_t = _import_legacy() if body.get("import") else ({}, {})
             VAULT.create(pw, import_keys=imp_k, import_token=imp_t)
             tok = _new_session(); _touch(); VIEWER.invalidate()
             return self._json(200, {"ok": True, "imported": len(imp_k)}, self._setcookie(tok))
         if path == "/api/vault/factory_reset":
             if not VAULT.has_vault():
-                return self._json(200, {"ok": False, "error": "kein Tresor vorhanden"})
-            if body.get("confirm") != "ZURUECKSETZEN":
-                return self._json(200, {"ok": False, "error": "Bestätigung fehlt"})
+                return self._json(200, {"ok": False, "error": "no vault present"})
+            if body.get("confirm") != "RESET":
+                return self._json(200, {"ok": False, "error": "Confirmation missing"})
             VAULT.factory_reset()
             hubconf.clear_secrets()
             DERIVED.drop()   # sealed thumbnails/telemetry: unreadable without the old master key anyway
@@ -1071,7 +1071,7 @@ class H(BaseHTTPRequestHandler):
             if VAULT.unlock_with_pass(body.get("pass", "")):
                 tok = _new_session(); _touch(); VIEWER.invalidate()
                 return self._json(200, {"ok": True}, self._setcookie(tok))
-            return self._json(200, {"ok": False, "error": "falsches Passwort"})
+            return self._json(200, {"ok": False, "error": "wrong password"})
         if path == "/api/logout":
             _drop_sessions(); VAULT.lock(); VIEWER.clear_cache()
             return self._json(200, {"ok": True})
@@ -1083,10 +1083,10 @@ class H(BaseHTTPRequestHandler):
         if path == "/api/vault/change_pass":
             old, new = body.get("old", ""), body.get("new", "")
             if not new:
-                return self._json(400, {"ok": False, "error": "neues Passwort fehlt"})
+                return self._json(400, {"ok": False, "error": "new password missing"})
             try:
                 if not VAULT.change_pass(old, new):
-                    return self._json(400, {"ok": False, "error": "aktuelles Passwort falsch"})
+                    return self._json(400, {"ok": False, "error": "current password wrong"})
                 return self._json(200, {"ok": True})
             except VaultError as e:
                 return self._json(400, {"ok": False, "error": str(e)})
@@ -1277,7 +1277,7 @@ class H(BaseHTTPRequestHandler):
             return self._json(200, r)
         if path == "/api/keepawake/stop":
             r = keepawake.stop()
-            eventlog.log_event("keepawake", "Wach halten beendet")
+            eventlog.log_event("keepawake", "Keep-awake stopped")
             return self._json(200, r)
         if path == "/api/canbus/read":
             try:

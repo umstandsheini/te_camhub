@@ -182,7 +182,7 @@ def install_ble_binaries():
         with urllib.request.urlopen(BLE_BINARIES_URL, timeout=60) as resp:
             data = resp.read()
     except Exception as e:
-        return {"ok": False, "error": f"Download fehlgeschlagen: {e}"[:300]}
+        return {"ok": False, "error": f"Download failed: {e}"[:300]}
     subprocess.run(["mount", "/", "-o", "remount,rw"], capture_output=True)
     try:
         os.makedirs(BLE_BIN, exist_ok=True)
@@ -199,7 +199,7 @@ def install_ble_binaries():
     finally:
         subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
     if not ble_binaries_installed():
-        return {"ok": False, "error": "Download hat die Programme nicht bereitgestellt"}
+        return {"ok": False, "error": "Download did not provide the tools"}
     return {"ok": True}
 
 
@@ -213,14 +213,14 @@ def _ble_ensure_key(name):
     if os.path.isfile(priv) and os.path.isfile(pub):
         return {"ok": True, "already": True}
     if not ble_binaries_installed():
-        return {"ok": False, "error": "BLE-Programme erst installieren"}
+        return {"ok": False, "error": "Install the BLE tools first"}
     subprocess.run(["mount", "/", "-o", "remount,rw"], capture_output=True)
     try:
         os.makedirs(os.path.dirname(priv), exist_ok=True)
         r = subprocess.run([f"{BLE_BIN}/tesla-keygen", "-key-file", priv, "-output", pub, "create"],
                             capture_output=True, text=True, timeout=30)
         if r.returncode != 0 or not (os.path.isfile(priv) and os.path.isfile(pub)):
-            return {"ok": False, "error": (r.stderr or "Schlüsselerzeugung fehlgeschlagen").strip()[:200]}
+            return {"ok": False, "error": (r.stderr or "key generation failed").strip()[:200]}
         os.chmod(priv, 0o600)
         os.chmod(pub, 0o644)
         return {"ok": True}
@@ -248,7 +248,7 @@ def ble_pair_role(name, role):
     r = _tc_run([f"{BLE_BIN}/tesla-control", "-ble", "-vin", vin.upper(),
                  "add-key-request", pub, role, "cloud_key"], timeout=60)
     if r.returncode != 0:
-        return {"ok": False, "error": (r.stderr or r.stdout or "Kopplungsanfrage fehlgeschlagen").strip()[:300]}
+        return {"ok": False, "error": (r.stderr or r.stdout or "Pairing request failed").strip()[:300]}
     return {"ok": True}
 
 
@@ -261,21 +261,21 @@ def ble_pair_role(name, role):
 # the user re-tested by hand and confirmed it's not transient.
 # id -> (label, args).
 BLE_READS = {
-    "charge": ("Ladezustand", ["state", "charge"]),
-    "closures": ("Verriegelung/Türen", ["state", "closures"]),
-    "climate": ("Klimazustand", ["state", "climate"]),
-    "tire_pressure": ("Reifendruck", ["state", "tire-pressure"]),
-    "location": ("Standort", ["state", "location"]),
-    "drive": ("Fahrzustand", ["state", "drive"]),
-    "media": ("Medienstatus", ["state", "media"]),
-    "media_detail": ("Medien-Details", ["state", "media-detail"]),
-    "charge_schedule": ("Lade-Zeitplan", ["state", "charge-schedule"]),
-    "precondition_schedule": ("Vorklimatisierungs-Zeitplan", ["state", "precondition-schedule"]),
-    "software_update": ("Software-Update-Status", ["state", "software-update"]),
-    "parental_controls": ("Kindersicherung-Status", ["state", "parental-controls"]),
-    "body_controller": ("Basiszustand (VCSEC)", ["body-controller-state"]),
-    "list_keys": ("Alle Schlüssel", ["list-keys"]),
-    "ping": ("Erreichbarkeit", ["ping"]),
+    "charge": ("Charge state", ["state", "charge"]),
+    "closures": ("Locks/doors", ["state", "closures"]),
+    "climate": ("Climate state", ["state", "climate"]),
+    "tire_pressure": ("Tire pressure", ["state", "tire-pressure"]),
+    "location": ("Location", ["state", "location"]),
+    "drive": ("Drive state", ["state", "drive"]),
+    "media": ("Media status", ["state", "media"]),
+    "media_detail": ("Media details", ["state", "media-detail"]),
+    "charge_schedule": ("Charge schedule", ["state", "charge-schedule"]),
+    "precondition_schedule": ("Preconditioning schedule", ["state", "precondition-schedule"]),
+    "software_update": ("Software update status", ["state", "software-update"]),
+    "parental_controls": ("Parental controls status", ["state", "parental-controls"]),
+    "body_controller": ("Base state (VCSEC)", ["body-controller-state"]),
+    "list_keys": ("All keys", ["list-keys"]),
+    "ping": ("Reachability", ["ping"]),
 }
 
 # charge_port_open/charge_port_close/honk/flash_lights were confirmed
@@ -286,14 +286,14 @@ BLE_READS = {
 # _ble_unavailable filter, since the user re-tested by hand and this is now
 # a known, durable fact rather than a one-off failure to auto-recover from.
 BLE_ACTIONS = {
-    "charging_start": ("Laden starten", ["charging-start"]),
-    "charging_stop": ("Laden stoppen", ["charging-stop"]),
-    "charging_set_limit": ("Ladegrenze setzen", ["charging-set-limit", "80"]),
-    "charging_set_amps": ("Ladestrom setzen", ["charging-set-amps", "16"]),
-    "charging_schedule_cancel": ("Lade-Zeitplan abbrechen", ["charging-schedule-cancel"]),
-    "wake": ("Auto aufwecken", ["wake"]),
-    "keep_accessory_power_on": ("Zubehör-Stromversorgung an", ["keep-accessory-power", "on"]),
-    "keep_accessory_power_off": ("Zubehör-Stromversorgung aus", ["keep-accessory-power", "off"]),
+    "charging_start": ("Start charging", ["charging-start"]),
+    "charging_stop": ("Stop charging", ["charging-stop"]),
+    "charging_set_limit": ("Set charge limit", ["charging-set-limit", "80"]),
+    "charging_set_amps": ("Set charge current", ["charging-set-amps", "16"]),
+    "charging_schedule_cancel": ("Cancel charge schedule", ["charging-schedule-cancel"]),
+    "wake": ("Wake the car", ["wake"]),
+    "keep_accessory_power_on": ("Accessory power on", ["keep-accessory-power", "on"]),
+    "keep_accessory_power_off": ("Accessory power off", ["keep-accessory-power", "off"]),
 }
 # Actuation commands (lock/unlock, trunk/frunk, climate, windows) exist in Tesla's
 # own tesla-control CLI, but were deliberately NOT added here: they'd need a
@@ -307,10 +307,10 @@ BLE_ACTIONS = {
 def _ble_base(name):
     vin = hubconf.getval("TESLA_BLE_VIN")
     if not vin:
-        return None, {"ok": False, "error": "Fahrzeug-VIN erst eintragen und speichern"}
+        return None, {"ok": False, "error": "Enter and save the vehicle VIN first"}
     priv, _pub = _ble_keypath(name)
     if not os.path.isfile(priv):
-        return None, {"ok": False, "error": "noch nicht gekoppelt"}
+        return None, {"ok": False, "error": "not paired yet"}
     return [f"{BLE_BIN}/tesla-control", "-ble", "-vin", vin.upper(), "-key-file", priv], None
 
 
@@ -407,7 +407,7 @@ def ble_read(name, read_id):
         return err
     r = _tc_run(base + args)
     if r.returncode != 0:
-        err = (r.stderr or r.stdout or "Fehler").strip()[:300]
+        err = (r.stderr or r.stdout or "error").strip()[:300]
         if _looks_like_privilege_error(err):
             _ble_unavailable.add(read_id)
         return {"ok": False, "error": err}
@@ -423,7 +423,7 @@ def ble_exec(name, action_id, value=None):
     """Run exactly one confirmed-allowed action command."""
     spec = BLE_ACTIONS.get(action_id)
     if not spec:
-        return {"ok": False, "error": "unbekannter Befehl"}
+        return {"ok": False, "error": "unknown command"}
     label, args = spec
     base, err = _ble_base(name)
     if err:
@@ -433,11 +433,11 @@ def ble_exec(name, action_id, value=None):
         try:
             final_args[-1] = str(int(value))
         except (TypeError, ValueError):
-            return {"ok": False, "error": "ungültiger Wert"}
+            return {"ok": False, "error": "invalid value"}
     r = _tc_run(base + final_args)
     ok = r.returncode == 0
     lines = (r.stderr or r.stdout or "").strip().splitlines()
-    detail = lines[-1] if lines else ("OK" if ok else "Fehler")
+    detail = lines[-1] if lines else ("OK" if ok else "error")
     if not ok and _looks_like_privilege_error(detail):
         _ble_unavailable.add(action_id)
     return {"ok": ok, "label": label, "detail": detail[:200]}
@@ -542,18 +542,18 @@ def apply_ap_on_usb(enabled, ssid=None, password=None, ap_ip=None):
             return {"ok": True}
         usb_if = _usb_wifi_device()
         if not usb_if:
-            return {"ok": False, "error": "kein USB-WLAN-Adapter gefunden -- erst einstecken"}
+            return {"ok": False, "error": "no USB Wi-Fi adapter found -- plug it in first"}
         r = subprocess.run(["nmcli", "-t", "-f", "NAME", "c", "show"], capture_output=True, text=True)
         has_ap = "TESLAUSB_AP" in (r.stdout or "").splitlines()
         if not has_ap and not (ssid and password):
-            return {"ok": False, "error": "zuerst Access-Point-SSID und -Passwort eintragen und speichern"}
+            return {"ok": False, "error": "enter and save the access point SSID and password first"}
         if ssid and password:
             r = subprocess.run(["bash", "/opt/teslacam-hub/ap-usb-ensure.sh", ssid, password, ap_ip or "192.168.66.1"],
                                 capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
-                return {"ok": False, "error": (r.stderr or "AP-Einrichtung auf USB fehlgeschlagen").strip()[:200]}
+                return {"ok": False, "error": (r.stderr or "AP setup on USB failed").strip()[:200]}
         else:
-            return {"ok": False, "error": "Access-Point-SSID/-Passwort fehlen"}
+            return {"ok": False, "error": "access point SSID/password missing"}
         return {"ok": True}
     finally:
         subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
@@ -589,12 +589,12 @@ def apply_ap_fallback(enabled, ssid=None, password=None, ap_ip=None):
 
         if enabled:
             if not has_ap and not (ssid and password):
-                return {"ok": False, "error": "zuerst Access-Point-SSID und -Passwort eintragen und speichern"}
+                return {"ok": False, "error": "enter and save the access point SSID and password first"}
             if ssid and password:
                 r = subprocess.run(["bash", "/opt/teslacam-hub/ap-ensure.sh", ssid, password, ap_ip or "192.168.66.1"],
                                     capture_output=True, text=True, timeout=30)
                 if r.returncode != 0:
-                    return {"ok": False, "error": (r.stderr or "AP-Einrichtung fehlgeschlagen").strip()[:200]}
+                    return {"ok": False, "error": (r.stderr or "AP setup failed").strip()[:200]}
             else:
                 _set_ap_autoconnect(False)
             subprocess.run(["bash", "/opt/teslacam-hub/wifi-watch.sh"], capture_output=True)
@@ -639,11 +639,11 @@ def apply_hotspot_wifi(enabled, ssid=None, password=None):
     try:
         if enabled:
             if not (ssid and password):
-                return {"ok": False, "error": "zuerst Hotspot-SSID und -Passwort eintragen und speichern"}
+                return {"ok": False, "error": "enter and save the hotspot SSID and password first"}
             r = subprocess.run(["bash", "/opt/teslacam-hub/hotspot-ensure.sh", ssid, password],
                                 capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
-                return {"ok": False, "error": (r.stderr or "Hotspot-Einrichtung fehlgeschlagen").strip()[:200]}
+                return {"ok": False, "error": (r.stderr or "Hotspot setup failed").strip()[:200]}
         else:
             subprocess.run(["nmcli", "con", "delete", "TESLAUSB_HOTSPOT"], capture_output=True)
         return {"ok": True}
@@ -678,7 +678,7 @@ def apply_wireguard(enabled, peer_pubkey=None, endpoint=None, allowed_ips=None,
         subprocess.run(["systemctl", "disable", "--now", "wg-quick@wg0"], capture_output=True)
         return {"ok": True}
     if not (peer_pubkey and endpoint and address):
-        return {"ok": False, "error": "Peer-Public-Key, Endpoint und Tunnel-Adresse werden benötigt"}
+        return {"ok": False, "error": "Peer public key, endpoint and tunnel address are required"}
     stdin = "".join(f"{k}={v}\n" for k, v in [
         ("PEER_PUBKEY", peer_pubkey), ("ENDPOINT", endpoint),
         ("ALLOWED_IPS", allowed_ips or "0.0.0.0/0"), ("ADDRESS", address),
@@ -690,7 +690,7 @@ def apply_wireguard(enabled, peer_pubkey=None, endpoint=None, allowed_ips=None,
         r = subprocess.run(["bash", "/opt/teslacam-hub/wg-ensure.sh"], input=stdin,
                             capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
-            return {"ok": False, "error": (r.stderr or "WireGuard-Einrichtung fehlgeschlagen").strip()[:200]}
+            return {"ok": False, "error": (r.stderr or "WireGuard setup failed").strip()[:200]}
     finally:
         subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
     subprocess.run(["systemctl", "enable", "wg-quick@wg0"], capture_output=True)
@@ -753,31 +753,31 @@ def import_wg_qr(image_b64):
     try:
         raw = base64.b64decode(image_b64, validate=True)
     except Exception:
-        return {"ok": False, "error": "ungültige Bilddaten"}
+        return {"ok": False, "error": "invalid image data"}
     if not raw:
-        return {"ok": False, "error": "kein Bild empfangen"}
+        return {"ok": False, "error": "no image received"}
     if len(raw) > 8 * 1024 * 1024:
-        return {"ok": False, "error": "Bild zu groß (max. 8 MB)"}
+        return {"ok": False, "error": "Image too large (max. 8 MB)"}
     try:
         from pyzbar.pyzbar import decode as zbar_decode
         from PIL import Image
     except ImportError:
-        return {"ok": False, "error": "QR-Decoder nicht installiert -- hub/install.sh erneut ausführen"}
+        return {"ok": False, "error": "QR decoder not installed -- run hub/install.sh again"}
     try:
         img = Image.open(io.BytesIO(raw))
         img.load()
     except Exception:
-        return {"ok": False, "error": "Datei ist kein lesbares Bild"}
+        return {"ok": False, "error": "file is not a readable image"}
     try:
         results = zbar_decode(img)
     except Exception as e:
-        return {"ok": False, "error": f"QR-Decoder-Fehler: {str(e)[:150]}"}
+        return {"ok": False, "error": f"QR decoder error: {str(e)[:150]}"}
     if not results:
-        return {"ok": False, "error": "Kein QR-Code im Bild gefunden"}
+        return {"ok": False, "error": "No QR code found in the image"}
     text = results[0].data.decode("utf-8", errors="replace")
     parsed = _parse_wg_config(text)
     if not (parsed.get("peer_pubkey") and parsed.get("endpoint")):
-        return {"ok": False, "error": "QR-Code enthält keine gültige WireGuard-Konfiguration"}
+        return {"ok": False, "error": "QR code contains no valid WireGuard configuration"}
     return {"ok": True, "config": parsed}
 
 
@@ -823,13 +823,13 @@ def set_ssh_password(password):
     flow), so tying SSH auth to it would be both technically awkward and a
     good way to accidentally lock out SSH access."""
     if not password or len(password) < 8:
-        return {"ok": False, "error": "Passwort muss mindestens 8 Zeichen haben"}
+        return {"ok": False, "error": "Password must be at least 8 characters"}
     subprocess.run(["mount", "/", "-o", "remount,rw"], capture_output=True)
     try:
         r = subprocess.run(["chpasswd"], input=f"pi:{password}\n", text=True,
                             capture_output=True, timeout=10)
         if r.returncode != 0:
-            return {"ok": False, "error": (r.stderr or "chpasswd fehlgeschlagen").strip()[:200]}
+            return {"ok": False, "error": (r.stderr or "chpasswd failed").strip()[:200]}
         return {"ok": True}
     finally:
         subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
@@ -882,7 +882,7 @@ def apply_samba(enabled):
             subprocess.run(["mount", "/", "-o", "remount,ro"], capture_output=True)
         return {"ok": True}
     if not _has_smbd():
-        return {"ok": False, "error": "Samba ist nicht installiert -- hub/install.sh erneut ausführen"}
+        return {"ok": False, "error": "Samba is not installed -- run hub/install.sh again"}
     subprocess.run(["mount", "/", "-o", "remount,rw"], capture_output=True)
     try:
         subprocess.run(["systemctl", "enable", "--now", "smbd", "nmbd"], capture_output=True)
@@ -899,11 +899,11 @@ def set_samba_password(password):
     setup/pi/configure-samba.sh), so unlike set_ssh_password this needs no
     root-fs remount."""
     if not password or len(password) < 8:
-        return {"ok": False, "error": "Passwort muss mindestens 8 Zeichen haben"}
+        return {"ok": False, "error": "Password must be at least 8 characters"}
     if not _has_smbd():
-        return {"ok": False, "error": "Samba ist nicht installiert -- hub/install.sh erneut ausführen"}
+        return {"ok": False, "error": "Samba is not installed -- run hub/install.sh again"}
     r = subprocess.run(["smbpasswd", "-s", "-a", "pi"], input=f"{password}\n{password}\n",
                         text=True, capture_output=True, timeout=10)
     if r.returncode != 0:
-        return {"ok": False, "error": (r.stderr or "smbpasswd fehlgeschlagen").strip()[:200]}
+        return {"ok": False, "error": (r.stderr or "smbpasswd failed").strip()[:200]}
     return {"ok": True}

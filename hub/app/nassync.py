@@ -66,10 +66,10 @@ PAIRING_FILE = "HUB-NAS-KOPPLUNG.json"
 TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-(.+)\.mp4$", re.I)
 README_NAME = "SCHLUESSEL-INFO.txt"
 README_TEXT = (
-    "Diese *.mp4.key.json Dateien enthalten den Entschluesselungs-Schluessel\n"
-    "(FEK) fuer die gleichnamige Videodatei im selben Ordner, verschluesselt\n"
-    "mit dem Tresor-Passwort der TeslaCam Hub App. Ohne dieses Passwort sind\n"
-    "sie nutzlos. 'IMG_0001-front.mp4.key.json' gehoert zu 'IMG_0001-front.mp4'.\n"
+    "These *.mp4.key.json files contain the decryption key\n"
+    "(FEK) for the video file of the same name in the same folder, encrypted\n"
+    "with the vault password of the TeslaCam Hub app. Without that password they\n"
+    "are useless. 'IMG_0001-front.mp4.key.json' belongs to 'IMG_0001-front.mp4'.\n"
 )
 
 _guard = threading.Lock()
@@ -97,7 +97,7 @@ def _mount(mnt, rw, share=None):
     password = hubconf.getval("SHARE_PASSWORD")
     vers = hubconf.getval("CIFS_VERSION") or "3.0"
     if not server or not share:
-        raise RuntimeError("NAS nicht konfiguriert")
+        raise RuntimeError("NAS not configured")
     os.makedirs(mnt, exist_ok=True)
     # A Hub process killed mid-operation (the OOM killer) leaves its share
     # mounted here, and mount.cifs then refuses the mountpoint on every
@@ -121,7 +121,7 @@ def _mount(mnt, rw, share=None):
         # mount.cifs ends with a generic "Refer to the mount.cifs(8) manual
         # page ..." line; the useful one is "mount error(N): ...".
         lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
-        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount fehlgeschlagen")
+        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount failed")
         raise RuntimeError(msg[:200])
 
 
@@ -396,7 +396,7 @@ def _media_mount(mnt, rw):
     password = hubconf.getval("SHARE_PASSWORD")
     vers = hubconf.getval("CIFS_VERSION") or "3.0"
     if not server or not raw:
-        raise RuntimeError("Sync-Pfad nicht konfiguriert (unter Einstellungen eintragen und speichern)")
+        raise RuntimeError("Sync path not configured (enter and save it under Settings)")
     share, _, subpath = raw.partition("/")
     os.makedirs(mnt, exist_ok=True)
     # A Hub process killed mid-operation (the OOM killer) leaves its share
@@ -421,7 +421,7 @@ def _media_mount(mnt, rw):
         # mount.cifs ends with a generic "Refer to the mount.cifs(8) manual
         # page ..." line; the useful one is "mount error(N): ...".
         lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
-        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount fehlgeschlagen")
+        msg = next((l for l in lines if "mount error" in l), lines[-1] if lines else "Mount failed")
         raise RuntimeError(msg[:200])
     return subpath
 
@@ -431,7 +431,7 @@ def _rsync(src, dst, errors, label):
         ["rsync", "-rt", "--no-perms", "--no-owner", "--no-group", src + "/", dst + "/"],
         capture_output=True, text=True, timeout=1800)
     if r.returncode != 0:
-        errors.append(f"{label}: {(r.stderr or '').splitlines()[-1][:200] if r.stderr else 'rsync-Fehler'}")
+        errors.append(f"{label}: {(r.stderr or '').splitlines()[-1][:200] if r.stderr else 'rsync error'}")
         return False
     return True
 
@@ -596,11 +596,11 @@ def _reconstructed_event(folder, event_name):
     reason is genuinely unknown (only the car's file has it)."""
     m = _EVENT_TS_RE.search(event_name)
     ts = "%s-%s-%sT%s:%s:%s" % m.groups() if m else ""
-    ev = {"timestamp": ts, "city": "", "reason": "unbekannt (rekonstruiert)", "camera": "0",
+    ev = {"timestamp": ts, "city": "", "reason": "unknown (reconstructed)", "camera": "0",
           "reconstructed": True, "reconstructed_by": "TeslaCam Hub",
-          "note": "Original event.json ist mit dem Konsolen-Schluessel des Autos verschluesselt "
-                  "und ausserhalb des Fahrzeugs nicht lesbar; dies ist ein Ersatz aus Ordnername "
-                  "und Telemetrie."}
+          "note": "Original event.json is encrypted with the car console key "
+                  "and not readable outside the vehicle; this is a substitute from the folder name "
+                  "and telemetry."}
     loc = _first_telemetry_point(folder)
     if loc:
         ev["est_lat"], ev["est_lon"] = "%.6f" % loc[0], "%.6f" % loc[1]
@@ -648,7 +648,7 @@ def mirror_event_files():
             if not os.path.isdir(dec_root):
                 with _guard:
                     _events_cache.update(t=time.time(), ok=True, error=None, copied=0, rebuilt=0, cleaned=0)
-                return {"ok": True, "copied": 0, "skipped": "kein decrypted-Ordner auf dem NAS"}
+                return {"ok": True, "copied": 0, "skipped": "no decrypted folder on the NAS"}
             for group in ("SavedClips", "SentryClips", "TeslaTrackMode"):
                 gdir = os.path.join(enc_root, group)
                 if not os.path.isdir(gdir):
@@ -674,7 +674,7 @@ def mirror_event_files():
     finally:
         _op_lock.release()
     if copied or rebuilt or cleaned:
-        print("[hub] event-Daten: %d kopiert, %d rekonstruiert, %d unbrauchbare Container entfernt"
+        print("[hub] event data: %d copied, %d reconstructed, %d unusable containers removed"
               % (copied, rebuilt, cleaned), flush=True)
     with _guard:
         _events_cache.update(t=time.time(), ok=not errors, error="; ".join(errors[:3]) or None,
@@ -907,9 +907,9 @@ def _ensure_nas_pairing(mnt, state_dir):
     with open(nas_file, "w", encoding="utf-8") as f:
         json.dump({"hub_pairing_token": new_tok,
                     "created": datetime.datetime.utcnow().isoformat() + "Z",
-                    "note": "Kopplungs-Nachweis zwischen diesem TeslaCam Hub und diesem NAS. "
-                            "Nicht löschen/verändern, sonst verweigert der Hub weitere "
-                            "Roh-Schlüssel-Übertragungen zu diesem Share."}, f, indent=2)
+                    "note": "Pairing proof between this TeslaCam Hub and this NAS. "
+                            "Do not delete/modify, otherwise the Hub refuses further "
+                            "raw-key transfers to this share."}, f, indent=2)
     return True
 
 
@@ -934,9 +934,9 @@ def push_raw_keys(scan_dir, vault, state_dir):
     try:
         if not _ensure_nas_pairing(mnt, state_dir):
             return {"ok": False, "written": 0,
-                    "error": "NAS-Kopplung ungültig -- Prüfdatei fehlt oder stimmt nicht überein. "
-                             "Keine Rohschlüssel übertragen (falsches/vertauschtes NAS?). "
-                             "Falls das NAS bewusst gewechselt wurde: Kopplung zurücksetzen und erneut versuchen."}
+                    "error": "NAS pairing invalid -- check file missing or does not match. "
+                             "No raw keys transferred (wrong/swapped NAS?). "
+                             "If the NAS was changed deliberately: reset the pairing and try again."}
         for rel, fek_b64 in _archived_with_key(mnt, keys, ".rawkey.json"):
             remote_mp4 = os.path.join(mnt, rel)
             sidecar = remote_mp4 + ".rawkey.json"

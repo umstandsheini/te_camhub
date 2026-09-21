@@ -170,7 +170,7 @@ def write_settings(values: dict):
                 return False, f"{field} muss eine Zahl sein"
         elif field == "retention_mode":
             if val not in ("off", "time", "space", ""):
-                return False, "retention_mode ungültig"
+                return False, "retention_mode invalid"
         esc = "'" + val.replace("'", "'\\''") + "'"
         updates.append((var, "export %s=%s" % (var, esc)))
     if not updates:
@@ -206,7 +206,7 @@ def import_conf(text):
     check only -- this is a trusted admin action, not attacker input --
     just enough to stop an obviously-wrong file from wiping the config."""
     if not text or "export " not in text:
-        return False, "Datei sieht nicht wie eine gültige teslausb-Konfiguration aus"
+        return False, "File does not look like a valid teslausb configuration"
     subprocess.run(["mount", "/", "-o", "remount,rw"], capture_output=True)
     try:
         tmp = CONF + ".tmp"
@@ -246,7 +246,7 @@ def test_nas(server=None, share=None, user=None, password=None):
     password = password or getval("SHARE_PASSWORD")
     vers = getval("CIFS_VERSION") or "3.0"
     if not server or not share:
-        return {"ok": False, "error": "Server/Share fehlt"}
+        return {"ok": False, "error": "Server/share missing"}
     mnt = "/tmp/hub_nastest"
     os.makedirs(mnt, exist_ok=True)
     creds = tempfile.NamedTemporaryFile("w", delete=False)
@@ -258,7 +258,7 @@ def test_nas(server=None, share=None, user=None, password=None):
                             "-o", "credentials=%s,vers=%s,iocharset=utf8,rw" % (creds.name, vers)],
                            capture_output=True, text=True, timeout=25)
         if r.returncode != 0:
-            return {"ok": False, "error": (r.stderr or "Mount fehlgeschlagen").splitlines()[-1][:200]}
+            return {"ok": False, "error": (r.stderr or "Mount failed").splitlines()[-1][:200]}
         try:
             probe = os.path.join(mnt, ".hub_write_test")
             open(probe, "w").close(); os.remove(probe); writable = True

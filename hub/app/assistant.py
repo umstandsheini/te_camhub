@@ -14,7 +14,7 @@ Safety model:
   - The tools can only read/write a staging dir and the LightShow/Boombox
     folders -- no shell, no arbitrary paths.
   - Everything that changes what the car sees (install/remove) blocks until
-    the user clicks "Ausführen" in the UI; Claude can't approve its own
+    the user clicks "Run" in the UI; Claude can't approve its own
     actions.
   - Downloads refuse hosts that resolve to private/loopback/link-local
     addresses, also after redirects, so a web page can't talk the agent into
@@ -47,7 +47,7 @@ PRICE_IN, PRICE_OUT = 5.0, 25.0
 STAGING = "/backingfiles/hub-assistant-staging"   # XFS, plenty of room; /mutable has only 300 MB
 MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024            # the LightShow drive itself is ~250 MB
 MAX_UNZIPPED_BYTES = 400 * 1024 * 1024
-USER_AGENT = "TeslaCamHub-Assistent/1.0"
+USER_AGENT = "TeslaCamHub-Assistant/1.0"
 
 # Partition roots as teslausb's autofs mounts them (run/auto.www); the car
 # looks for a LightShow/ resp. Boombox/ folder at the root of each drive.
@@ -58,10 +58,10 @@ BOOMBOX_DIR = os.path.join(BOOMBOX_ROOT, "Boombox")
 AUDIO_EXTS = (".mp3", ".wav")
 STAGE_EXTS = (".fseq",) + AUDIO_EXTS
 BOOMBOX_SELECTABLE = 5   # the car only offers the first five files, alphabetically
-DETACH_NOTE = ("Die USB-Laufwerke werden dafür ein paar Sekunden vom Auto getrennt – "
-               "die Dashcam pausiert so lange.")
+DETACH_NOTE = ("The USB drives are detached from the car for a few seconds – "
+               "the dashcam pauses meanwhile.")
 
-SYSTEM_PROMPT = """You are the assistant inside "TeslaCam Hub", a Raspberry Pi in the glovebox of the user's Tesla Model Y that emulates the car's USB drives. The user talks to you from their phone, usually on the road. Your job: find custom light shows and Boombox sounds on the web and install them onto the car's USB drives. Reply in German, briefly -- it's a phone screen.
+SYSTEM_PROMPT = """You are the assistant inside "TeslaCam Hub", a Raspberry Pi in the glovebox of the user's Tesla Model Y that emulates the car's USB drives. The user talks to you from their phone, usually on the road. Your job: find custom light shows and Boombox sounds on the web and install them onto the car's USB drives. Reply in English, briefly -- it's a phone screen.
 
 How files reach the car:
 - download_file fetches a file (or a ZIP, which gets unpacked) into the Pi's staging area and reports what it found, including format checks.
@@ -196,12 +196,12 @@ def state(since=0):
 def send(text):
     text = str(text or "").strip()[:4000]
     if not text:
-        return {"ok": False, "error": "leere Nachricht"}
+        return {"ok": False, "error": "empty message"}
     if not _key():
         return {"ok": False, "error": "Kein API-Key hinterlegt"}
     with _lock:
         if _state["busy"]:
-            return {"ok": False, "error": "Der Assistent arbeitet noch"}
+            return {"ok": False, "error": "The assistant is still working"}
         _messages.append({"role": "user", "content": text})
         _state["busy"] = True
         gen, msgs = _gen, _messages
@@ -213,7 +213,7 @@ def send(text):
 def confirm(cid, approve):
     with _lock:
         if not _pending or _pending.get("id") != cid:
-            return {"ok": False, "error": "Keine offene Bestätigung (schon beantwortet?)"}
+            return {"ok": False, "error": "No open confirmation (already answered?)"}
         _pending["approved"] = bool(approve)
         _pending["event"].set()
     return {"ok": True}
@@ -240,22 +240,22 @@ def set_key(key):
         _vault.set_secret(SECRET_NAME, "")
         return {"ok": True, "key_set": False}
     if not key.startswith("sk-ant-"):
-        return {"ok": False, "error": "Das sieht nicht nach einem Anthropic-API-Key aus (beginnt mit sk-ant-)"}
+        return {"ok": False, "error": "That does not look like an Anthropic API key (starts with sk-ant-)"}
     try:
         import anthropic
     except ImportError:
-        return {"ok": False, "error": "Python-Paket „anthropic“ fehlt – hub/install.sh erneut ausführen"}
+        return {"ok": False, "error": "Python package \"anthropic\" missing – run hub/install.sh again"}
     warning = None
     try:
         anthropic.Anthropic(api_key=key, timeout=20.0, max_retries=1).models.retrieve(MODEL)
     except anthropic.AuthenticationError:
-        return {"ok": False, "error": "Key wurde abgelehnt (ungültig oder widerrufen)"}
+        return {"ok": False, "error": "Key was rejected (invalid or revoked)"}
     except anthropic.PermissionDeniedError:
         return {"ok": False, "error": "Key hat keinen Zugriff auf " + MODEL}
     except anthropic.NotFoundError:
-        return {"ok": False, "error": "Modell %s ist für diesen Key nicht verfügbar" % MODEL}
+        return {"ok": False, "error": "Model %s is not available for this key" % MODEL}
     except (anthropic.APIStatusError, anthropic.APIConnectionError):
-        warning = "konnte gerade nicht geprüft werden"
+        warning = "could not be verified right now"
     _vault.set_secret(SECRET_NAME, key)
     return {"ok": True, "key_set": True, "warning": warning}
 
@@ -267,7 +267,7 @@ def _worker(gen, msgs):
         _run_conversation(gen, msgs)
     except Exception as e:
         traceback.print_exc()
-        _emit("error", text="Interner Fehler: %s" % str(e)[:300])
+        _emit("error", text="Internal error: %s" % str(e)[:300])
     finally:
         with _lock:
             if gen == _gen:
@@ -283,17 +283,17 @@ def _run_conversation(gen, msgs):
     try:
         import anthropic   # lazy: ~50 MB of pydantic/httpx2, only once the tab is actually used
     except ImportError:
-        _emit("error", text="Python-Paket „anthropic“ fehlt – hub/install.sh erneut ausführen.")
+        _emit("error", text="Python package \"anthropic\" missing – run hub/install.sh again.")
         return
     key = _key()
     if not key:
-        _emit("error", text="Kein API-Key verfügbar (Tresor gesperrt?).")
+        _emit("error", text="No API key available (vault locked?).")
         return
     client = anthropic.Anthropic(api_key=key, timeout=API_TIMEOUT_SEC, max_retries=2)
     pauses = rounds = 0
     while gen == _gen:
         if not _vault.is_unlocked():
-            _emit("error", text="Tresor wurde gesperrt – Assistent angehalten.")
+            _emit("error", text="Vault was locked – assistant stopped.")
             return
         try:
             resp = client.beta.messages.create(
@@ -320,13 +320,13 @@ def _run_conversation(gen, msgs):
             _emit("error", text="Rate-Limit bei Anthropic erreicht – in einer Minute erneut senden.")
             return
         except anthropic.BadRequestError as e:
-            _emit("error", text="Anfrage abgelehnt: " + _api_msg(e))
+            _emit("error", text="Request rejected: " + _api_msg(e))
             return
         except anthropic.APIStatusError as e:
-            _emit("error", text="Anthropic-Fehler %s: %s" % (e.status_code, _api_msg(e)))
+            _emit("error", text="Anthropic error %s: %s" % (e.status_code, _api_msg(e)))
             return
         except anthropic.APIConnectionError:
-            _emit("error", text="Keine Verbindung zu api.anthropic.com – Hotspot/Internet prüfen und erneut senden.")
+            _emit("error", text="No connection to api.anthropic.com – check hotspot/internet and send again.")
             return
         if gen != _gen:
             return
@@ -340,7 +340,7 @@ def _run_conversation(gen, msgs):
             # the paused assistant turn last resumes it.
             pauses += 1
             if pauses > MAX_PAUSE_CONTINUATIONS:
-                _emit("error", text="Die Websuche dauert ungewöhnlich lange – abgebrochen.")
+                _emit("error", text="The web search is taking unusually long – aborted.")
                 return
             continue
         if stop == "tool_use":
@@ -350,8 +350,8 @@ def _run_conversation(gen, msgs):
             rounds += 1
             if rounds > MAX_TOOL_ROUNDS:
                 msgs.append({"role": "user", "content": [
-                    _result(b.id, "Abgebrochen: zu viele Schritte in einer Anfrage.", True) for b in calls]})
-                _emit("error", text="Zu viele Schritte – angehalten. Bitte genauer beschreiben, was installiert werden soll.")
+                    _result(b.id, "Aborted: too many steps in one request.", True) for b in calls]})
+                _emit("error", text="Too many steps – stopped. Please describe more precisely what should be installed.")
                 return
             results = [_run_tool(b) for b in calls]   # all results go back in one user message
             if gen != _gen:
@@ -359,9 +359,9 @@ def _run_conversation(gen, msgs):
             msgs.append({"role": "user", "content": results})
             continue
         if stop == "refusal":
-            _emit("info", text="Claude hat diese Anfrage abgelehnt.")
+            _emit("info", text="Claude rejected this request.")
         elif stop == "max_tokens":
-            _emit("info", text="Antwort wurde wegen des Längenlimits abgeschnitten.")
+            _emit("info", text="Response was truncated due to the length limit.")
         return
 
 
@@ -436,13 +436,13 @@ def _result(tool_use_id, payload, is_error=False):
 
 
 _LABELS = {
-    "list_installed": "📋 Prüft installierte Dateien",
-    "list_staging": "📋 Prüft Zwischenspeicher",
-    "clear_staging": "🧹 Leert Zwischenspeicher",
-    "download_file": "⬇️ Lädt: {url}",
-    "install_lightshow": "✨ Lightshow installieren: {fseq}",
-    "install_boombox_sound": "🔊 Boombox-Sound installieren: {file}",
-    "remove_installed": "🗑️ Entfernen: {name}",
+    "list_installed": "📋 Checks installed files",
+    "list_staging": "📋 Checks staging area",
+    "clear_staging": "🧹 Clears staging area",
+    "download_file": "⬇️ Downloading: {url}",
+    "install_lightshow": "✨ Install light show: {fseq}",
+    "install_boombox_sound": "🔊 Install Boombox sound: {file}",
+    "remove_installed": "🗑️ Remove: {name}",
 }
 
 
@@ -461,8 +461,8 @@ def _run_tool(block):
         if name in _PLANNERS:
             summary, details, action = _PLANNERS[name](inp)
             if not _ask_confirmation(summary, details):
-                return _result(block.id, "Der Nutzer hat diese Aktion nicht bestätigt. Nicht erneut versuchen, "
-                                         "außer er bittet ausdrücklich darum.")
+                return _result(block.id, "The user did not confirm this action. Don't retry, "
+                                         "unless they explicitly ask.")
             ui, payload = action()
         elif name in _PLAIN_TOOLS:
             ui, payload = _PLAIN_TOOLS[name](inp)
@@ -475,12 +475,12 @@ def _run_tool(block):
         return _result(block.id, str(e), True)
     except Exception as e:
         traceback.print_exc()
-        _emit("step", text="✗ Fehler: " + str(e)[:200], err=True)
-        return _result(block.id, "Interner Fehler: " + str(e)[:300], True)
+        _emit("step", text="✗ Error: " + str(e)[:200], err=True)
+        return _result(block.id, "Internal error: " + str(e)[:300], True)
 
 
 def _ask_confirmation(summary, details):
-    """Block the worker until the user clicks Ausführen/Abbrechen."""
+    """Block the worker until the user clicks Run/Cancel."""
     cid = secrets.token_hex(6)
     ev = threading.Event()
     with _lock:
@@ -498,7 +498,7 @@ def _ask_confirmation(summary, details):
             _pending.clear()
             _state["pending"] = None
     _emit("confirm_result", id=cid, approved=approved,
-          text="✓ bestätigt" if approved else ("✗ abgelehnt" if answered else "✗ keine Antwort innerhalb von 30 Minuten"))
+          text="✓ confirmed" if approved else ("✗ rejected" if answered else "✗ no answer within 30 minutes"))
     return approved
 
 
@@ -549,25 +549,25 @@ def _fseq_check(path):
     with open(path, "rb") as f:
         h = f.read(32)
     if len(h) < 24 or h[:4] != b"PSEQ":
-        return {"ok": False, "errors": ["keine FSEQ-Datei (Kennung PSEQ fehlt)"], "warnings": []}
+        return {"ok": False, "errors": ["not an FSEQ file (PSEQ signature missing)"], "warnings": []}
     start, minor, major = struct.unpack_from("<HBB", h, 4)
     channels, frames, step = struct.unpack_from("<IIB", h, 10)
     errors, warnings = [], []
     if major != 2 or start < 24:
-        errors.append("unbekanntes Format, FSEQ v2.0 erwartet (ist v%d.%d)" % (major, minor))
+        errors.append("unknown format, FSEQ v2.0 expected (is v%d.%d)" % (major, minor))
     elif minor not in (0, 2):
-        warnings.append("ungewöhnliche FSEQ-Version v2.%d" % minor)
+        warnings.append("unusual FSEQ version v2.%d" % minor)
     if channels not in (48, 200):
-        errors.append("48 oder 200 Kanäle erwartet, hat %d" % channels)
+        errors.append("expected 48 or 200 channels, has %d" % channels)
     if frames < 1:
-        errors.append("enthält keine Frames")
+        errors.append("contains no frames")
     if step < 15:
-        errors.append("Schrittweite %d ms, mindestens 15 ms nötig" % step)
+        errors.append("step size %d ms, at least 15 ms needed" % step)
     if h[20] != 0:
         errors.append("komprimiert – muss in xLights als „V2 Uncompressed“ exportiert sein")
     duration = frames * step / 1000.0
     if duration > 4 * 3600:
-        errors.append("länger als 4 Stunden")
+        errors.append("longer than 4 hours")
     return {"ok": not errors, "errors": errors, "warnings": warnings,
             "channels": channels, "step_ms": step, "duration_s": round(duration, 1)}
 
@@ -582,7 +582,7 @@ def _audio_check(path, for_show):
         if ext == ".wav":
             h = f.read(12)
             if h[:4] != b"RIFF" or h[8:12] != b"WAVE":
-                return {"ok": False, "errors": ["keine gültige WAV-Datei"], "warnings": []}
+                return {"ok": False, "errors": ["not a valid WAV file"], "warnings": []}
             while True:
                 ch = f.read(8)
                 if len(ch) < 8:
@@ -610,12 +610,12 @@ def _audio_check(path, for_show):
                         rate = _MP3_RATES[ver][idx]
                         break
             if rate is None:
-                return {"ok": False, "errors": ["keine gültige MP3-Datei (kein MPEG-Frame gefunden)"], "warnings": []}
+                return {"ok": False, "errors": ["not a valid MP3 file (no MPEG frame found)"], "warnings": []}
     warnings = []
     if rate is None:
-        warnings.append("Abtastrate nicht erkennbar")
+        warnings.append("sample rate not detectable")
     elif for_show and rate != 44100:
-        warnings.append("Abtastrate %d Hz – Tesla empfiehlt 44,1 kHz, sonst läuft die Musik nicht synchron zur Show" % rate)
+        warnings.append("sample rate %d Hz – Tesla recommends 44.1 kHz, otherwise the music will not stay in sync with the show" % rate)
     return {"ok": True, "errors": [], "warnings": warnings, "sample_rate": rate}
 
 
@@ -634,16 +634,16 @@ def _check_host(url):
         p = urllib.parse.urlsplit(url)
         port = p.port or (443 if p.scheme == "https" else 80)
     except ValueError:
-        raise ToolError("Ungültige Adresse")
+        raise ToolError("Invalid address")
     if p.scheme not in ("http", "https") or not p.hostname:
         raise ToolError("Nur direkte http(s)-Adressen sind erlaubt")
     try:
         infos = socket.getaddrinfo(p.hostname, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
-        raise ToolError("Server %s nicht gefunden (DNS)" % p.hostname)
+        raise ToolError("Server %s not found (DNS)" % p.hostname)
     for info in infos:
         if not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
-            raise ToolError("%s zeigt ins lokale/private Netz – aus Sicherheitsgründen gesperrt" % p.hostname)
+            raise ToolError("%s points into the local/private network – blocked for security reasons" % p.hostname)
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
@@ -686,7 +686,7 @@ def _extract_zip(path):
                     continue
                 total += info.file_size
                 if total > MAX_UNZIPPED_BYTES:
-                    raise ToolError("ZIP-Inhalt zu groß (max. %s MB)" % _mb(MAX_UNZIPPED_BYTES))
+                    raise ToolError("ZIP content too large (max. %s MB)" % _mb(MAX_UNZIPPED_BYTES))
                 fname, k = (stem or "datei") + ext, 2
                 while fname.lower() in used:   # same name in different folders of the ZIP
                     fname, k = "%s-%d%s" % (stem or "datei", k, ext), k + 1
@@ -701,7 +701,7 @@ def _extract_zip(path):
                                 break
                             written += len(chunk)
                             if written > info.file_size + 1024:
-                                raise ToolError("ZIP-Eintrag größer als angegeben – abgebrochen")
+                                raise ToolError("ZIP entry larger than declared – aborted")
                             dst.write(chunk)
                 except BaseException:
                     _rm(dest + ".part")
@@ -709,9 +709,9 @@ def _extract_zip(path):
                 os.replace(dest + ".part", dest)
                 out.append(dest)
     except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as e:
-        raise ToolError("ZIP nicht lesbar: %s" % str(e)[:150])
+        raise ToolError("ZIP not readable: %s" % str(e)[:150])
     if not out:
-        raise ToolError("Das ZIP enthält keine .fseq/.mp3/.wav-Dateien")
+        raise ToolError("The ZIP contains no .fseq/.mp3/.wav files")
     return out
 
 
@@ -726,7 +726,7 @@ def _t_download(inp):
         with opener.open(req, timeout=60) as r:
             clen = r.headers.get("Content-Length") or ""
             if clen.isdigit() and int(clen) > MAX_DOWNLOAD_BYTES:
-                raise ToolError("Datei zu groß (%s MB, max. %s MB)" % (_mb(int(clen)), _mb(MAX_DOWNLOAD_BYTES)))
+                raise ToolError("File too large (%s MB, max. %s MB)" % (_mb(int(clen)), _mb(MAX_DOWNLOAD_BYTES)))
             ctype = (r.headers.get("Content-Type") or "").lower()
             name = (str(inp.get("filename") or "") or _cd_name(r.headers.get("Content-Disposition"))
                     or urllib.parse.unquote(os.path.basename(urllib.parse.urlsplit(r.geturl()).path)))
@@ -738,17 +738,17 @@ def _t_download(inp):
                         break
                     n += len(chunk)
                     if n > MAX_DOWNLOAD_BYTES:
-                        raise ToolError("Datei zu groß (max. %s MB)" % _mb(MAX_DOWNLOAD_BYTES))
+                        raise ToolError("File too large (max. %s MB)" % _mb(MAX_DOWNLOAD_BYTES))
                     f.write(chunk)
     except urllib.error.HTTPError as e:
         _rm(tmp)
-        raise ToolError("Server antwortet mit HTTP %s" % e.code)
+        raise ToolError("Server responds with HTTP %s" % e.code)
     except urllib.error.URLError as e:
         _rm(tmp)
-        raise ToolError("Download fehlgeschlagen: %s" % e.reason)
+        raise ToolError("Download failed: %s" % e.reason)
     except TimeoutError:
         _rm(tmp)
-        raise ToolError("Zeitüberschreitung beim Download")
+        raise ToolError("Timeout during download")
     except BaseException:
         _rm(tmp)
         raise
@@ -763,19 +763,19 @@ def _t_download(inp):
         sniffed = _sniff_ext(head)
         if not sniffed and (head.lstrip()[:1] == b"<" or "text/html" in ctype):
             _rm(tmp)
-            raise ToolError("Die Adresse liefert eine Webseite statt einer Datei – direkten Download-Link verwenden "
-                            "(bei GitHub z. B. raw.githubusercontent.com statt …/blob/…).")
+            raise ToolError("The address returns a web page instead of a file – use a direct download link "
+                            "(on GitHub e.g. raw.githubusercontent.com instead of …/blob/…).")
         stem, ext = _clean_file(name or "download", _SHOW_BAD)
         if ext not in STAGE_EXTS:
             ext = sniffed
         if not ext:
             _rm(tmp)
-            raise ToolError("Dateityp nicht unterstützt – nur .fseq, .mp3, .wav oder ZIP")
+            raise ToolError("File type not supported – only .fseq, .mp3, .wav or ZIP")
         dest = os.path.join(STAGING, (stem or "download") + ext)
         os.replace(tmp, dest)
         staged = [dest]
     files = [_describe(p) for p in staged]
-    return "%d Datei(en) im Zwischenspeicher" % len(files), {"staged": files}
+    return "%d file(s) in the staging area" % len(files), {"staged": files}
 
 
 # ---------- plain tools ---------------------------------------------------------------
@@ -788,7 +788,7 @@ def _staged(name):
     base = os.path.basename(str(name or "").replace("\\", "/"))
     p = os.path.join(STAGING, base)
     if not base or base.startswith(".") or not os.path.isfile(p):
-        raise ToolError("„%s“ liegt nicht im Zwischenspeicher (list_staging zeigt, was da ist)" % name)
+        raise ToolError("\"%s\" is not in the staging area (list_staging shows what is there)" % name)
     return p
 
 
@@ -798,7 +798,7 @@ def _drive_ok(root, label):
             return
     except OSError:
         pass
-    raise ToolError("Das %s-Laufwerk ist gerade nicht verfügbar" % label)
+    raise ToolError("The %s drive is currently unavailable" % label)
 
 
 def _space(root):
@@ -852,12 +852,12 @@ def _t_list_installed(inp):
 
 def _t_list_staging(inp):
     files = [_describe(p) for p in _staged_files()]
-    return "%d Datei(en) im Zwischenspeicher" % len(files), {"staged": files}
+    return "%d file(s) in the staging area" % len(files), {"staged": files}
 
 
 def _t_clear_staging(inp):
     shutil.rmtree(STAGING, ignore_errors=True)
-    return "Zwischenspeicher geleert", {"ok": True}
+    return "Staging area cleared", {"ok": True}
 
 
 def _copy_in(pairs):
@@ -870,29 +870,29 @@ def _copy_in(pairs):
 def _plan_install_lightshow(inp):
     fseq, audio = _staged(inp.get("fseq")), _staged(inp.get("audio"))
     if not fseq.lower().endswith(".fseq"):
-        raise ToolError("fseq muss eine .fseq-Datei sein")
+        raise ToolError("fseq must be a .fseq file")
     aext = os.path.splitext(audio)[1].lower()
     if aext not in AUDIO_EXTS:
-        raise ToolError("audio muss eine .mp3- oder .wav-Datei sein")
+        raise ToolError("audio must be a .mp3 or .wav file")
     fc, ac = _fseq_check(fseq), _audio_check(audio, True)
     if fc["errors"] or ac["errors"]:
-        raise ToolError("Nicht installierbar: " + "; ".join(fc["errors"] + ac["errors"]))
+        raise ToolError("Not installable: " + "; ".join(fc["errors"] + ac["errors"]))
     name = _clean(inp.get("name") or os.path.splitext(os.path.basename(fseq))[0], _SHOW_BAD)
     if not name:
-        raise ToolError("Kein gültiger Show-Name")
+        raise ToolError("Not a valid show name")
     _drive_ok(LIGHTSHOW_ROOT, "LightShow")
     existing = [os.path.join(LIGHTSHOW_DIR, n) for n in _listdir(LIGHTSHOW_DIR)
                 if os.path.splitext(n)[0].lower() == name.lower() and os.path.splitext(n)[1].lower() in STAGE_EXTS]
     if existing and not inp.get("replace"):
-        raise ToolError("Eine Show „%s“ ist schon installiert – replace=true zum Überschreiben oder anderen Namen wählen" % name)
+        raise ToolError("A show \"%s\" is already installed – use replace=true to overwrite or choose a different name" % name)
     size = os.path.getsize(fseq) + os.path.getsize(audio)
     need = size - sum(os.path.getsize(p) for p in existing)
     free = shutil.disk_usage(LIGHTSHOW_ROOT).free
     if need > free - 1048576:
-        raise ToolError("Zu wenig Platz auf dem LightShow-Laufwerk: braucht %s MB, frei sind %s MB – vorher etwas entfernen"
+        raise ToolError("Not enough space on the LightShow drive: needs %s MB, %s MB free – remove something first"
                         % (_mb(need), _mb(free)))
-    summary = "Lightshow „%s“ installieren (%s MB)%s" % (name, _mb(size), " – ersetzt die vorhandene" if existing else "")
-    details = ["%d Kanäle, %s, Audio %s" % (fc["channels"], _dur(fc["duration_s"]), aext[1:].upper())]
+    summary = "Install light show \"%s\" (%s MB)%s" % (name, _mb(size), " – replaces the existing one" if existing else "")
+    details = ["%d channels, %s, audio %s" % (fc["channels"], _dur(fc["duration_s"]), aext[1:].upper())]
     details += fc["warnings"] + ac["warnings"] + [DETACH_NOTE]
 
     def action():
@@ -903,9 +903,9 @@ def _plan_install_lightshow(inp):
             _copy_in([(fseq, os.path.join(LIGHTSHOW_DIR, name + ".fseq")),
                       (audio, os.path.join(LIGHTSHOW_DIR, name + aext))])
         filemod.with_drives_detached(write)
-        return ("„%s“ installiert" % name,
+        return ("\"%s\" installed" % name,
                 {"installed": [name + ".fseq", name + aext],
-                 "note": "Laufwerke wurden neu verbunden; die Show steht im Auto unter Toybox -> Light Show."})
+                 "note": "Drives reconnected; the show is in the car under Toybox -> Light Show."})
     return summary, details, action
 
 
@@ -913,32 +913,32 @@ def _plan_install_boombox(inp):
     src = _staged(inp.get("file"))
     stem, ext = _clean_file(src, _BOOMBOX_BAD)
     if ext not in AUDIO_EXTS:
-        raise ToolError("Boombox braucht eine .mp3- oder .wav-Datei")
+        raise ToolError("Boombox needs a .mp3 or .wav file")
     ac = _audio_check(src, False)
     if ac["errors"]:
-        raise ToolError("Nicht installierbar: " + "; ".join(ac["errors"]))
+        raise ToolError("Not installable: " + "; ".join(ac["errors"]))
     if inp.get("name"):
         stem = _clean(os.path.splitext(str(inp["name"]))[0], _BOOMBOX_BAD)
     if not stem:
-        raise ToolError("Kein gültiger Dateiname")
+        raise ToolError("Not a valid file name")
     fname = stem + ext
     _drive_ok(BOOMBOX_ROOT, "Boombox")
     existing = [os.path.join(BOOMBOX_DIR, n) for n in _listdir(BOOMBOX_DIR) if n.lower() == fname.lower()]
     if existing and not inp.get("replace"):
-        raise ToolError("„%s“ ist schon installiert – replace=true zum Überschreiben oder anderen Namen wählen" % fname)
+        raise ToolError("\"%s\" is already installed – use replace=true to overwrite or choose a different name" % fname)
     size = os.path.getsize(src)
     need = size - sum(os.path.getsize(p) for p in existing)
     free = shutil.disk_usage(BOOMBOX_ROOT).free
     if need > free - 1048576:
-        raise ToolError("Zu wenig Platz auf dem Boombox-Laufwerk: braucht %s MB, frei sind %s MB – vorher etwas entfernen"
+        raise ToolError("Not enough space on the Boombox drive: needs %s MB, %s MB free – remove something first"
                         % (_mb(need), _mb(free)))
     order = sorted({s["file"].lower() for s in _boombox_sounds()} | {fname.lower()})
     pos = order.index(fname.lower()) + 1
     details = list(ac["warnings"])
     if pos > BOOMBOX_SELECTABLE:
-        details.append("Alphabetisch an Stelle %d – das Auto bietet nur die ersten %d Sounds an." % (pos, BOOMBOX_SELECTABLE))
+        details.append("Alphabetically at position %d – the car only offers the first %d sounds." % (pos, BOOMBOX_SELECTABLE))
     details.append(DETACH_NOTE)
-    summary = "Boombox-Sound „%s“ installieren (%s MB)%s" % (fname, _mb(size), " – ersetzt den vorhandenen" if existing else "")
+    summary = "Install Boombox sound \"%s\" (%s MB)%s" % (fname, _mb(size), " – replaces the existing one" if existing else "")
 
     def action():
         def write():
@@ -947,7 +947,7 @@ def _plan_install_boombox(inp):
                 os.remove(p)
             _copy_in([(src, os.path.join(BOOMBOX_DIR, fname))])
         filemod.with_drives_detached(write)
-        return ("„%s“ installiert" % fname,
+        return ("\"%s\" installed" % fname,
                 {"installed": fname, "position_in_car_list": pos, "selectable_in_car": pos <= BOOMBOX_SELECTABLE})
     return summary, details, action
 
@@ -967,7 +967,7 @@ def _plan_remove(inp):
     else:
         raise ToolError("kind muss lightshow oder boombox sein")
     if not targets:
-        raise ToolError("%s ist nicht installiert (list_installed zeigt, was da ist)" % label)
+        raise ToolError("%s is not installed (list_installed shows what is there)" % label)
     summary = "%s entfernen (%s MB)" % (label, _mb(sum(os.path.getsize(p) for p in targets)))
 
     def action():
@@ -975,7 +975,7 @@ def _plan_remove(inp):
             for p in targets:
                 os.remove(p)
         filemod.with_drives_detached(delete)
-        return "%s entfernt" % label, {"removed": [os.path.basename(p) for p in targets]}
+        return "%s removed" % label, {"removed": [os.path.basename(p) for p in targets]}
     return summary, [DETACH_NOTE], action
 
 

@@ -207,14 +207,14 @@ def tick(nas):
                 hub_done = (nas.get("completed_start") or -1) >= threshold
                 waiting = []
                 if not arch_done:
-                    waiting.append("Archivierung (neuer Versuch nach Fehler)"
-                                   if arch[0] == "failed" else "Archivierung")
+                    waiting.append("Archiving (retry after error)"
+                                   if arch[0] == "failed" else "Archiving")
                 if not hub_done:
                     err = nas.get("error")
                     if err and (nas.get("failed_start") or -1) >= threshold:
-                        waiting.append(f"NAS-Abgleich (letzter Fehler: {err[:120]})")
+                        waiting.append(f"NAS sync (last error: {err[:120]})")
                     else:
-                        waiting.append("NAS-Abgleich")
+                        waiting.append("NAS sync")
                 if waiting != st["waiting_for"]:
                     st["waiting_for"] = waiting
                     changed = True
